@@ -9,13 +9,10 @@ using namespace std;
 
 namespace Game{
 
-    const int WINDOW_W=1024;
-    const int WINDOW_H=768;
-    //recommended size for video capture:
-    //const int WINDOW_W=640;
-    //const int WINDOW_H=480;
-    const bool FULLSCREEN=false;
     const bool CAPTURE_VIDEO=false;
+    const bool FULLSCREEN=false;
+    const int WINDOW_W=CAPTURE_VIDEO?640:1024;
+    const int WINDOW_H=CAPTURE_VIDEO?480:768;
     const float FOV=105.0f;
     const int CENTER_X=WINDOW_W/2;
     const int CENTER_Y=WINDOW_H/2;
@@ -32,7 +29,7 @@ namespace Game{
     int frames=0;
     float camx,camy,camz;
     float lookx,looky,lookz;
-    float sensitivity=0.0012f;
+    float sensitivity=0.0010f;
     char healthhud[400];
 
     MTRand rng;
@@ -48,14 +45,13 @@ namespace Game{
     const int MAX_PARTICLES=1024;
     const unsigned char Z_NONE=0;
     const unsigned char Z_DEAD=1;
-    const unsigned char Z_IDLE=2; //hiding
     const unsigned char Z_WANDERING=3; //wandering about
     const unsigned char Z_ATTACKING=4; //running at players
     const unsigned char Z_HEALTH=10; //pickup
     const unsigned char Z_AMMO=11; //pickup
 
     struct Player{
-        float x,y,z;
+        float x,y,z,vx,vy,vz;
         float lookr,lookp;
         float shootdelay;
         int health,ammo;
@@ -81,8 +77,9 @@ namespace Game{
         KB_RIGHT=2,
         KB_FORWARD=4,
         KB_BACK=8,
-        KB_USE=16,
-        KB_FIRE=32
+        KB_JUMP=16,
+        KB_USE=32,
+        KB_FIRE=64
     };
 
     struct FrameData{
@@ -108,6 +105,9 @@ namespace Game{
         pl[p].x=camx=248.0;
         pl[p].y=camy=2.5;
         pl[p].z=camz=248.0;
+        pl[p].vx=0;
+        pl[p].vy=0;
+        pl[p].vz=0;
         pl[p].lookr=0.0;
         pl[p].lookp=0.0;
         lookx=0.0;
@@ -315,17 +315,19 @@ namespace Game{
         const float offx=x-ix*16.0f;
         const float offz=z-iz*16.0f;
         //zeds
-        //TODO: check adjacent blocks
-        //const int jx=offx<8.0f?ix-1:ix+1;
-        //const int jz=offz<8.0f?iz-1:iz+1;
-        int c=cols[iz*32+ix];
-        while(c!=-1){
-            if(c!=me && sqr(x-zed[c].x)+sqr(z-zed[c].z)<2.56f){
-                const float dist=sqrtf(sqr(x-zed[c].x)+sqr(z-zed[c].z));
-                x+=(1.60f-dist)*(x-zed[c].x)/dist;
-                z+=(1.60f-dist)*(z-zed[c].z)/dist;
+        const int jx=offx<8.0f?ix-1:ix+1;
+        const int jz=offz<8.0f?iz-1:iz+1;
+        const int cs[4]={cols[iz*32+ix],cols[iz*32+jx],cols[jz*32+ix],cols[jz*32+jx]};
+        for(int ic=0;ic<4;ic++){
+            int c=cs[ic];
+            while(c!=-1){
+                if(c!=me && sqr(x-zed[c].x)+sqr(z-zed[c].z)<2.56f){
+                    const float dist=sqrtf(sqr(x-zed[c].x)+sqr(z-zed[c].z));
+                    x+=(1.60f-dist)*(x-zed[c].x)/dist;
+                    z+=(1.60f-dist)*(z-zed[c].z)/dist;
+                }
+                c=zed[c].cnext;
             }
-            c=zed[c].cnext;
         }
         //walls
         if(offx<rad){
@@ -356,6 +358,8 @@ namespace Game{
     inline float abs(float x){ return x>0?x:-x; }
 
     int collideLine(float x, float y, float z, float dx, float dy, float dz){
+        //TODO: fix function for Y
+        //TODO: use bounding boxes
         //>=0 on zed collision, -1 on NO collision, -2 otherwise
         if(x<16.0f || x>31.0f*16.0f || z<16.0f || z>31.0f*16.0f || y<0.0f || y>48.0f)
             return -2;
@@ -363,6 +367,8 @@ namespace Game{
         const int iz=z/16.0f;
         const int ix2=(x+dx)/16.0f;
         const int iz2=(z+dz)/16.0f;
+        const float offx=x-ix*16.0f;
+        const float offz=z-iz*16.0f;
         const float halfdx=dx*0.5f;
         const float halfdy=dy*0.5f;
         const float halfdz=dz*0.5f;
@@ -405,30 +411,34 @@ namespace Game{
             return -2; //wall hit
         }
         nowallhit:
-        //TODO: check adjacent block
+        const int jx2=offx<8.0f?ix2-1:ix2+1;
+        const int jz2=offz<8.0f?iz2-1:iz2+1;
+        const int cs[4]={cols[iz2*32+ix2],cols[iz2*32+jx2],cols[jz2*32+ix2],cols[jz2*32+jx2]};
         const float maxdistsq=sqr(sqrt(halfdx*halfdx+halfdy*halfdy+halfdz*halfdz)+0.80f);
-        int c=cols[iz2*32+ix2];
-        while(c!=-1){
-            if(sqr(x-zed[c].x)+sqr(z-zed[c].z)<maxdistsq){
-                float nearx,neary,nearz;
-                if(abs(dx)>abs(dz)){
-                    nearx=((zed[c].z-z)*dx*dz+x*dz*dz+zed[c].x*dx*dx)/(dx*dx+dz*dz);
-                    const float p=(nearx-x)/dx;
-                    nearz=z+dz*p;
-                    neary=y+dy*p;
-                }else{
-                    nearz=((zed[c].x-x)*dx*dz+z*dx*dx+zed[c].z*dz*dz)/(dx*dx+dz*dz);
-                    const float p=(nearz-z)/dz;
-                    nearx=x+dx*p;
-                    neary=y+dy*p;
+        for(int ic=0;ic<4;ic++){
+            int c=cs[ic];
+            while(c!=-1){
+                if(sqr(x+halfdx-zed[c].x)+sqr(z+halfdz-zed[c].z)<maxdistsq){
+                    float nearx,neary,nearz;
+                    if(abs(dx)>abs(dz)){
+                        nearx=((zed[c].z-z)*dx*dz+x*dz*dz+zed[c].x*dx*dx)/(dx*dx+dz*dz);
+                        const float p=(nearx-x)/dx;
+                        nearz=z+dz*p;
+                        neary=y+dy*p;
+                    }else{
+                        nearz=((zed[c].x-x)*dx*dz+z*dx*dx+zed[c].z*dz*dz)/(dx*dx+dz*dz);
+                        const float p=(nearz-z)/dz;
+                        nearx=x+dx*p;
+                        neary=y+dy*p;
+                    }
+                    const float dist=sqrtf(sqr(zed[c].x-nearx)+sqr(zed[c].z-nearz));
+                    //this neary check isn't entirely accurate
+                    if(dist<0.80f && neary<2.8f+(0.80f-dist)*abs(dy/sqrtf(dx*dx+dz*dz))){
+                        return c;
+                    }
                 }
-                const float dist=sqrtf(sqr(zed[c].x-nearx)+sqr(zed[c].z-nearz));
-                //this neary check isn't entirely accurate
-                if(dist<0.80f && neary<2.8f+(0.80f-dist)*abs(dy/sqrtf(dx*dx+dz*dz))){
-                    return c;
-                }
+                c=zed[c].cnext;
             }
-            c=zed[c].cnext;
         }
         return -1;
     }
@@ -445,6 +455,7 @@ namespace Game{
                 if((--count)<=0)
                     break;
             }
+        /*
         if(zed[i].cnext!=-1)
             zed[zed[i].cnext].cprev=zed[i].cprev;
         if(zed[i].cprev!=-1)
@@ -453,11 +464,13 @@ namespace Game{
             cols[zed[i].iz*32+zed[i].ix]=zed[i].cnext;
         zed[i].cprev=-1;
         zed[i].cnext=-1;
-        zed[i].state=Z_NONE;
+        */
+        zed[i].state=Z_DEAD;
     }
 
     int updateFrame(){
-        const float GRAVITY=25.0f;
+        //const float GRAVITY=25.0f;
+        const float GRAVITY=15.0f;
         const float WALK_SPEED=10.0f;
         const float BULLET_SPEED=70.0f;
         const float BULLET_SPREAD=0.0f;
@@ -489,27 +502,30 @@ namespace Game{
         bool K_RIGHT=keyDown(SDLK_d);
         bool K_FORWARD=keyDown(SDLK_w);
         bool K_BACK=keyDown(SDLK_s);
+        bool K_JUMP=keyDown(SDLK_SPACE);
         bool K_USE=keyPressed(SDLK_e);
         bool K_FIRE=mb&SDL_BUTTON(1);
         if(CAPTURE_VIDEO){
             if(REPLAYING){
-                K_LEFT=replay->f[frames].keys&KB_LEFT;
-                K_RIGHT=replay->f[frames].keys&KB_RIGHT;
-                K_FORWARD=replay->f[frames].keys&KB_FORWARD;
-                K_BACK=replay->f[frames].keys&KB_BACK;
-                K_USE=replay->f[frames].keys&KB_USE;
-                K_FIRE=replay->f[frames].keys&KB_FIRE;
+                K_LEFT    =replay->f[frames].keys& KB_LEFT;
+                K_RIGHT   =replay->f[frames].keys& KB_RIGHT;
+                K_FORWARD =replay->f[frames].keys& KB_FORWARD;
+                K_BACK    =replay->f[frames].keys& KB_BACK;
+                K_JUMP    =replay->f[frames].keys& KB_JUMP;
+                K_USE     =replay->f[frames].keys& KB_USE;
+                K_FIRE    =replay->f[frames].keys& KB_FIRE;
                 pl[0].lookr=replay->f[frames].lookr;
                 pl[0].lookp=replay->f[frames].lookp;
             }else{
                 replay->f[frames].lookr=pl[0].lookr;
                 replay->f[frames].lookp=pl[0].lookp;
-                replay->f[frames].keys|=K_LEFT?KB_LEFT:0;
-                replay->f[frames].keys|=K_RIGHT?KB_RIGHT:0;
-                replay->f[frames].keys|=K_FORWARD?KB_FORWARD:0;
-                replay->f[frames].keys|=K_BACK?KB_BACK:0;
-                replay->f[frames].keys|=K_USE?KB_USE:0;
-                replay->f[frames].keys|=K_FIRE?KB_FIRE:0;
+                replay->f[frames].keys|= K_LEFT    ? KB_LEFT    :0;
+                replay->f[frames].keys|= K_RIGHT   ? KB_RIGHT   :0;
+                replay->f[frames].keys|= K_FORWARD ? KB_FORWARD :0;
+                replay->f[frames].keys|= K_BACK    ? KB_BACK    :0;
+                replay->f[frames].keys|= K_JUMP    ? KB_JUMP    :0;
+                replay->f[frames].keys|= K_USE     ? KB_USE     :0;
+                replay->f[frames].keys|= K_FIRE    ? KB_FIRE    :0;
             }
         }
 
@@ -526,6 +542,14 @@ namespace Game{
         }
         pl[0].x+=WALK_SPEED*(diry*cosf(pl[0].lookr)-dirx*sinf(pl[0].lookr))*t;
         pl[0].z+=WALK_SPEED*(dirx*cosf(pl[0].lookr)+diry*sinf(pl[0].lookr))*t;
+        if(pl[0].y>0){
+            pl[0].y-=pl[0].vy*t;
+            pl[0].vy-=GRAVITY*t;
+            if(pl[0].y<=0){
+                pl[0].y=0;
+                pl[0].vy=0;
+            }
+        }
         collideCharacter(-1,pl[0].x,pl[0].z,PL_RAD);
         camx=pl[0].x;
         camy=pl[0].y;
@@ -590,11 +614,6 @@ namespace Game{
                 if((c=collideLine(bullets[i].x,bullets[i].y,bullets[i].z,dx,dy,dz))!=-1){
                     if(c>=0){ //hit zed
                         killZed(c);
-                        /*switch(zed[c].state){
-                        case Z_DEAD: killZed(c); break;
-                        case Z_IDLE: zed[c].state=Z_DEAD; break;
-                        default: zed[c].state=Z_IDLE; break;
-                        }*/
                     }
                     for(int j=0;j<MAX_PARTICLES;j++)
                         if(particles[j].x==-1){
@@ -635,7 +654,6 @@ namespace Game{
         for(int i=0;i<MAX_ZEDS;i++) if(zed[i].state!=Z_NONE){
             switch(zed[i].state){
                 case Z_DEAD: break;
-                case Z_IDLE: break;
                 case Z_WANDERING: {
                     //wander aimlessly
                     zed[i].x+=WALK_SPEED*1.5f*cosf(zed[i].rot)*t;
