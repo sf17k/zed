@@ -11,8 +11,8 @@ namespace Game{
 
     const bool CAPTURE_VIDEO=false;
     const bool FULLSCREEN=false;
-    const int WINDOW_W=CAPTURE_VIDEO?640:1024;
-    const int WINDOW_H=CAPTURE_VIDEO?480:768;
+    const int WINDOW_W=CAPTURE_VIDEO?640:800;
+    const int WINDOW_H=CAPTURE_VIDEO?480:600;
     const float FOV=105.0f;
     const int CENTER_X=WINDOW_W/2;
     const int CENTER_Y=WINDOW_H/2;
@@ -26,9 +26,47 @@ namespace Game{
     bool isKeyPressed[SDLK_LAST];
     bool isKeyDown[SDLK_LAST];
 
+    struct vect{
+        float x,y,z;
+        inline vect():x(0.0f),y(0.0f),z(0.0f){}
+        inline vect(const float _x, const float _y, const float _z):x(_x),y(_y),z(_z){}
+        inline vect& set(const vect& v){ x=v.x; y=v.y; z=v.z; return *this; }
+        inline vect& set(const float _x,const float _y,const float _z){x=_x;y=_y;z=_z;return *this;}
+        inline vect& add(const vect& v){ x+=v.x; y+=v.y; z+=v.z; return *this; }
+        inline vect& sub(const vect& v){ x-=v.x; y-=v.y; z-=v.z; return *this; }
+        inline vect& add(const float _x,const float _y,const float _z){x+=_x;y+=_y;z+=_z;return *this;}
+        inline vect& adds(const vect& v, const float s){ x+=v.x*s; y+=v.y*s; z+=v.z*s; return *this; }
+        inline vect& cross(const vect& v){
+            const float ox=x,oy=y; x=oy*v.z-z*v.y; y=z*v.x-ox*v.z; z=ox*v.y-oy*v.x; return *this; }
+        inline vect& normalize(){
+            float d=x*x+y*y+z*z; if(d>0){ d=1.0f/sqrtf(d); x*=d; y*=d; z*=d; } return *this; }
+    };
+    inline float dot(const vect& v, const vect& w){ return v.x*w.x+v.y*w.y+v.z*w.z; }
+    inline float len(const vect& v){ return sqrtf(v.x*v.x+v.y*v.y+v.z*v.z); }
+
+    struct OBB{
+        vect ax,ay,az; //orthonormal basis
+        vect p,e; //center position, extents
+        inline OBB():ax(1.0f,0.0f,0.0f),ay(0.0f,1.0f,0.0f),az(0.0f,0.0f,1.0f){}
+        inline OBB(const vect& _p, const vect& _e)
+            :ax(1.0f,0.0f,0.0f),ay(0.0f,1.0f,0.0f),az(0.0f,0.0f,1.0f),p(_p),e(_e){}
+        void rotatex(const float r){
+            const float co=cosf(r); const float si=sinf(r); vect by,bz;
+            by.adds(ay,co).adds(az,si); bz.adds(ay,-si).adds(az,co); ay.set(by); az.set(bz); }
+        void rotatey(const float r){
+            const float co=cosf(r); const float si=sinf(r); vect bx,bz;
+            bx.adds(az,-si).adds(ax,co); bz.adds(az,co).adds(ax,si); ax.set(bx); az.set(bz); }
+        void rotatez(const float r){
+            const float co=cosf(r); const float si=sinf(r); vect bx,by;
+            bx.adds(ax,co).adds(ay,si); by.adds(ax,-si).adds(ay,co); ax.set(bx); ay.set(by); }
+        void translate(const vect& v){ p.adds(ax,v.x).adds(ay,v.y).adds(az,v.z); }
+        void ltow(vect& v)const{ vect r; r.adds(ax,v.x).adds(ay,v.y).adds(az,v.z).add(p); v.set(r); }
+        void wtol(vect& v)const{ v.sub(p); v.set(dot(ax,v),dot(ay,v),dot(az,v)); }
+    };
+
     int frames=0;
-    float camx,camy,camz;
-    float lookx,looky,lookz;
+    vect cam;
+    vect look;
     float sensitivity=0.0010f;
     char healthhud[400];
 
@@ -51,25 +89,31 @@ namespace Game{
     const unsigned char Z_AMMO=11; //pickup
 
     struct Player{
-        float x,y,z,vx,vy,vz;
+        vect p;
+        vect v;
         float lookr,lookp;
         float shootdelay;
         int health,ammo;
+        bool onground;
     }pl[MAX_PLAYERS];
 
     struct Zed{
         unsigned char state;
-        float x,y,z,rot;
+        vect p;
+        vect v;
+        float rot;
         int ix,iz;
         int cnext,cprev;
     }zed[MAX_ZEDS];
 
     struct Bullet{
-        float x,y,z,vx,vy,vz;
+        vect p;
+        vect v;
     }bullets[MAX_BULLETS];
 
     struct Particle{
-        float age,x,y,z;
+        vect p;
+        float age;
     }particles[MAX_PARTICLES];
 
     enum {
@@ -102,20 +146,16 @@ namespace Game{
     }
 
     void respawnPlayer(int p){
-        pl[p].x=camx=248.0;
-        pl[p].y=camy=2.5;
-        pl[p].z=camz=248.0;
-        pl[p].vx=0;
-        pl[p].vy=0;
-        pl[p].vz=0;
-        pl[p].lookr=0.0;
-        pl[p].lookp=0.0;
-        lookx=0.0;
-        looky=0.0;
-        lookz=0.0;
+        cam.set(pl[p].p.set(248.0f,0.0f,248.0f));
+        cam.y+=2.5f;
+        pl[p].v.set(0.0f,0.0f,0.0f);
+        pl[p].lookr=0.0f;
+        pl[p].lookp=0.0f;
+        look.set(0.0f,0.0f,0.0f);
         pl[p].shootdelay=0.5f;
         pl[p].health=100;
         pl[p].ammo=30;
+        pl[p].onground=true;
         updateHealthHud();
     }
 
@@ -232,9 +272,8 @@ namespace Game{
                     for(;c<MAX_ZEDS;c++)
                         if(zed[c].state==Z_NONE){
                             zed[c].state=type;
-                            zed[c].x=posx+jx;
-                            zed[c].z=posz+jz;
-                            zed[c].y=0.0f;
+                            zed[c].p.set(posx+jx,0.0f,posz+jz);
+                            zed[c].v.set(0.0f,0.0f,0.0f);
                             zed[c].rot=0.0f;
                             zed[c].ix=ix;
                             zed[c].iz=iz;
@@ -250,9 +289,8 @@ namespace Game{
             if(abs(ix-15)+abs(iz-15)<3)
                 continue;
             zed[c].state=Z_WANDERING;
-            zed[c].x=ix*16+8;
-            zed[c].y=0.0f;
-            zed[c].z=iz*16+8;
+            zed[c].p.set(ix*16.0f+8.0f,0.0f,iz*16.0f+8.0f);
+            zed[c].v.set(0.0f,0.0f,0.0f);
             zed[c].rot=rng()*M_PI*2;
             zed[c].ix=ix;
             zed[c].iz=iz;
@@ -264,9 +302,9 @@ namespace Game{
         }
 
         for(int i=0;i<MAX_BULLETS;i++)
-            bullets[i].x=-1;
+            bullets[i].p.x=-1;
         for(int i=0;i<MAX_PARTICLES;i++)
-            particles[i].x=-1;
+            particles[i].p.x=-1;
 
         respawnPlayer(0);
 
@@ -284,8 +322,8 @@ namespace Game{
     inline float sqr(float x){ return x*x; }
 
     void updateColInfo(const int i){
-        const int ix=zed[i].x/16.0f;
-        const int iz=zed[i].z/16.0f;
+        const int ix=zed[i].p.x/16.0f;
+        const int iz=zed[i].p.z/16.0f;
         if(zed[i].ix!=ix || zed[i].iz!=iz){
             if(zed[i].cnext!=-1)
                 zed[zed[i].cnext].cprev=zed[i].cprev;
@@ -302,13 +340,74 @@ namespace Game{
         }
     }
 
-    int collideCharacter(const int me, float& x, float& z, const float rad){
-        const float lastx=x;
-        const float lastz=z;
-        if(x<16.0f+rad) x=16.0f+rad;
-        if(z<16.0f+rad) z=16.0f+rad;
-        if(x>31.0f*16.0f-rad) x=31.0f*16.0f-rad;
-        if(z>31.0f*16.0f-rad) z=31.0f*16.0f-rad;
+    void makeOBB(OBB* b, const int c){
+        const float ZEDW2=0.565685425f;
+        if(c<0){
+            b->p.set(pl[0].p);
+            b->p.y+=1.4f;
+            b->e.set(vect(ZEDW2,1.4f,ZEDW2));
+            b->rotatey(-pl[0].lookr);
+            return;
+        }
+        b->p.set(zed[c].p);
+        if(zed[c].state==Z_DEAD){
+            b->p.y+=ZEDW2;
+            b->e.set(vect(1.4f,ZEDW2,ZEDW2));
+            b->rotatey(-zed[c].rot);
+        }else{
+            b->p.y+=1.4f;
+            b->e.set(vect(ZEDW2,1.4f,ZEDW2));
+            b->rotatey(-zed[c].rot-M_PI/4);
+        }
+    }
+
+    bool intersectionOBB(const OBB& a, const OBB& b){
+        vect t(b.p);
+        a.wtol(t);
+        //rotation matrix
+        vect rx(dot(a.ax,b.ax),dot(a.ax,b.ay),dot(a.ax,b.az));
+        vect ry(dot(a.ay,b.ax),dot(a.ay,b.ay),dot(a.ay,b.az));
+        vect rz(dot(a.az,b.ax),dot(a.az,b.ay),dot(a.az,b.az));
+        //a's basis vectors
+        if(fabs(t.x) > a.e.x+b.e.x*fabs(rx.x)+b.e.y*fabs(rx.y)+b.e.z*fabs(rx.z)) return false;
+        if(fabs(t.y) > a.e.y+b.e.x*fabs(ry.x)+b.e.y*fabs(ry.y)+b.e.z*fabs(ry.z)) return false;
+        if(fabs(t.z) > a.e.z+b.e.x*fabs(rz.x)+b.e.y*fabs(rz.y)+b.e.z*fabs(rz.z)) return false;
+        //b's basis vectors
+        if(fabs(t.x*rx.x+t.y*ry.x+t.z*rz.x) > b.e.x
+        + a.e.x*fabs(rx.x)+a.e.y*fabs(ry.x)+a.e.z*fabs(rz.x)) return false;
+        if(fabs(t.x*rx.y+t.y*ry.y+t.z*rz.y) > b.e.y
+        + a.e.x*fabs(rx.y)+a.e.y*fabs(ry.y)+a.e.z*fabs(rz.y)) return false;
+        if(fabs(t.x*rx.z+t.y*ry.z+t.z*rz.z) > b.e.z
+        + a.e.x*fabs(rx.z)+a.e.y*fabs(ry.z)+a.e.z*fabs(rz.z)) return false;
+        //9 cross products
+        if(fabs(t.z*ry.x-t.y*rz.x) > a.e.y*fabs(rz.x)+a.e.z*fabs(ry.x)
+        + b.e.y*fabs(rx.z)+b.e.z*fabs(rx.y)) return false;
+        if(fabs(t.z*ry.y-t.y*rz.y) > a.e.y*fabs(rz.y)+a.e.z*fabs(ry.y)
+        + b.e.x*fabs(rx.z)+b.e.z*fabs(rx.x)) return false;
+        if(fabs(t.z*ry.z-t.y*rz.z) > a.e.y*fabs(rz.z)+a.e.z*fabs(ry.z)
+        + b.e.x*fabs(rx.y)+b.e.y*fabs(rx.x)) return false;
+        if(fabs(t.x*rz.x-t.z*rx.x) > a.e.x*fabs(rz.x)+a.e.z*fabs(rx.x)
+        + b.e.y*fabs(ry.z)+b.e.z*fabs(ry.y)) return false;
+        if(fabs(t.x*rz.y-t.z*rx.y) > a.e.x*fabs(rz.y)+a.e.z*fabs(rx.y)
+        + b.e.x*fabs(ry.z)+b.e.z*fabs(ry.x)) return false;
+        if(fabs(t.x*rz.z-t.z*rx.z) > a.e.x*fabs(rz.z)+a.e.z*fabs(rx.z)
+        + b.e.x*fabs(ry.y)+b.e.y*fabs(ry.x)) return false;
+        if(fabs(t.y*rx.x-t.x*ry.x) > a.e.x*fabs(ry.x)+a.e.y*fabs(rx.x)
+        + b.e.y*fabs(rz.z)+b.e.z*fabs(rz.y)) return false;
+        if(fabs(t.y*rx.y-t.x*ry.y) > a.e.x*fabs(ry.y)+a.e.y*fabs(rx.y)
+        + b.e.x*fabs(rz.z)+b.e.z*fabs(rz.x)) return false;
+        if(fabs(t.y*rx.z-t.x*ry.z) > a.e.x*fabs(ry.z)+a.e.y*fabs(rx.z)
+        + b.e.x*fabs(rz.y)+b.e.y*fabs(rz.x)) return false;
+        return true;
+    }
+
+    //returns max of 0-none, 1-wall, 2-side of block, 3-zed
+    int collideCharacter(const int me, float& x, float& y, float& z, const float rad){
+        int ret=0;
+        if(x<16.0f+rad){ x=16.0f+rad; ret=1; }
+        if(z<16.0f+rad){ z=16.0f+rad; ret=1; }
+        if(x>31.0f*16.0f-rad){ x=31.0f*16.0f-rad; ret=1; }
+        if(z>31.0f*16.0f-rad){ z=31.0f*16.0f-rad; ret=1; }
         const int ix=x/16.0f;
         const int iz=z/16.0f;
         const int i=iz*32+ix;
@@ -321,15 +420,99 @@ namespace Game{
         for(int ic=0;ic<4;ic++){
             int c=cs[ic];
             while(c!=-1){
-                if(c!=me && sqr(x-zed[c].x)+sqr(z-zed[c].z)<2.56f){
-                    const float dist=sqrtf(sqr(x-zed[c].x)+sqr(z-zed[c].z));
-                    x+=(1.60f-dist)*(x-zed[c].x)/dist;
-                    z+=(1.60f-dist)*(z-zed[c].z)/dist;
+                if(c==me){
+                    c=zed[c].cnext;
+                    continue;
+                }
+                /*//obb-obb test
+                OBB b;
+                makeOBB(&b,c);
+                if(intersectionOBB(a,b)){
+                    const float HEIGHT=zed[c].p.y+(zed[c].state==Z_DEAD?1.13137085f:2.8f);
+                    if(me<0){
+                        if(pl[0].p.y>HEIGHT-0.3f && pl[0].p.y<HEIGHT){
+                            if(pl[0].v.y<0){
+                                pl[0].p.y=HEIGHT;
+                                pl[0].v.y=0;
+                            }
+                            pl[0].onground=true;
+                        }
+                    }else{
+                        if(zed[me].p.y>HEIGHT-0.3f && zed[me].p.y<HEIGHT){
+                            if(zed[me].v.y<0){
+                                zed[me].p.y=HEIGHT;
+                                zed[me].v.y=0;
+                            }
+                        }
+                    }
+                    makeOBB(&a,me);
+                }*/
+                if(zed[c].state==Z_DEAD){
+                    //upright-obb-upright-cylinder test
+                    OBB b;
+                    makeOBB(&b,c);
+                    vect p(x,y,z);
+                    b.wtol(p);
+                    if(!(p.y<-2.8f || p.y>b.e.y)){
+                        bool ontop=p.y>b.e.y-0.3f;
+                        bool hit=false;
+                        if(fabs(p.x)<b.e.x){
+                            if(fabs(p.z)<b.e.z+rad){
+                                hit=true;
+                                if(!ontop){
+                                    p.z=p.z>0?(b.e.z+rad+0.001f):-(b.e.z+rad+0.001f);
+                                    b.ltow(p); x=p.x; z=p.z;
+                                }
+                            }
+                        }else if(fabs(p.z)<b.e.z){
+                            if(fabs(p.x)<b.e.x+rad){
+                                hit=true;
+                                if(!ontop){
+                                    p.x=p.x>0?(b.e.x+rad+0.001f):-(b.e.x+rad+0.001f);
+                                    b.ltow(p); x=p.x; z=p.z;
+                                }
+                            }
+                        }else if(sqr(fabs(p.x)-b.e.x)+sqr(fabs(p.z)-b.e.z)<rad*rad){
+                            hit=true;
+                            if(!ontop){
+                                const float ddx=p.x>0?(p.x-b.e.x):(p.x+b.e.x);
+                                const float ddz=p.z>0?(p.z-b.e.z):(p.z+b.e.z);
+                                const float dist=sqrtf(ddx*ddx+ddz*ddz);
+                                p.x+=(rad-dist+0.001f)*ddx/dist;
+                                p.z+=(rad-dist+0.001f)*ddz/dist;
+                                b.ltow(p); x=p.x; z=p.z;
+                            }
+                        }
+                        if(hit && ontop){
+                            if(me<0){
+                                if(pl[0].v.y<0){
+                                    p.y=b.e.y; b.ltow(p);
+                                    pl[0].p.y=p.y;
+                                    pl[0].v.y=0;
+                                }
+                                pl[0].onground=true;
+                            }else{
+                                if(zed[me].v.y<0){
+                                    p.y=b.e.y; b.ltow(p);
+                                    zed[me].p.y=p.y;
+                                    zed[me].v.y=0;
+                                }
+                            }
+                        }else if(hit)
+                            if(ret<2) ret=2;
+                    }
+                }else if(sqr(x-zed[c].p.x)+sqr(z-zed[c].p.z)<2.56f && y+2.8f<zed[c].p.y && zed[c].p.y+2.8f<y){
+                    const float dist=sqrtf(sqr(x-zed[c].p.x)+sqr(z-zed[c].p.z));
+                    x+=(1.60f-dist)*(x-zed[c].p.x)/dist;
+                    z+=(1.60f-dist)*(z-zed[c].p.z)/dist;
+                    ret=3;
                 }
                 c=zed[c].cnext;
             }
         }
         //walls
+        const float lastx=x;
+        const float lastz=z;
         if(offx<rad){
             if( (map[i]&INSIDE_BIT || map[i-1]&INSIDE_BIT)
                 && !(map[i-1]&DOORX_BIT && offz>4+rad && offz<8-rad) )
@@ -350,16 +533,14 @@ namespace Game{
         }
         if(me>=0)
             updateColInfo(me);
-        if(x!=lastx || z!=lastz)
-            return 1;
-        return 0;
+        if(ret<1 && x!=lastx || z!=lastz)
+            ret=1;
+        return ret;
     }
 
     inline float abs(float x){ return x>0?x:-x; }
 
     int collideLine(float x, float y, float z, float dx, float dy, float dz){
-        //TODO: fix function for Y
-        //TODO: use bounding boxes
         //>=0 on zed collision, -1 on NO collision, -2 otherwise
         if(x<16.0f || x>31.0f*16.0f || z<16.0f || z>31.0f*16.0f || y<0.0f || y>48.0f)
             return -2;
@@ -414,71 +595,92 @@ namespace Game{
         const int jx2=offx<8.0f?ix2-1:ix2+1;
         const int jz2=offz<8.0f?iz2-1:iz2+1;
         const int cs[4]={cols[iz2*32+ix2],cols[iz2*32+jx2],cols[jz2*32+ix2],cols[jz2*32+jx2]};
-        const float maxdistsq=sqr(sqrt(halfdx*halfdx+halfdy*halfdy+halfdz*halfdz)+0.80f);
+        //const float maxdistsq=sqr(sqrt(halfdx*halfdx+halfdy*halfdy+halfdz*halfdz)+0.80f);
         for(int ic=0;ic<4;ic++){
             int c=cs[ic];
             while(c!=-1){
-                if(sqr(x+halfdx-zed[c].x)+sqr(z+halfdz-zed[c].z)<maxdistsq){
+                //obb-segment test against zed[c]
+                OBB b;
+                makeOBB(&b,c);
+                vect p1(x,y,z);
+                vect p2(x+halfdx,y+halfdy,z+halfdz);
+
+                b.wtol(p1);
+                b.wtol(p2);
+                vect l(p2); l.sub(p1); l.normalize();
+                vect t(p2);
+                p2.sub(p1);
+                if(!(fabs(t.x) > b.e.x+fabs(p2.x)
+                ||   fabs(t.y) > b.e.y+fabs(p2.y)
+                ||   fabs(t.z) > b.e.z+fabs(p2.z)
+                || fabs(t.y*l.z-t.z*l.y) > b.e.y*fabs(l.z)+b.e.z*fabs(l.y)
+                || fabs(t.x*l.z-t.z*l.x) > b.e.z*fabs(l.x)+b.e.x*fabs(l.z)
+                || fabs(t.x*l.y-t.y*l.x) > b.e.x*fabs(l.y)+b.e.y*fabs(l.x)))
+                    return c;
+                /*if(sqr(x+halfdx-zed[c].p.x)+sqr(z+halfdz-zed[c].p.z)<maxdistsq){
                     float nearx,neary,nearz;
                     if(abs(dx)>abs(dz)){
-                        nearx=((zed[c].z-z)*dx*dz+x*dz*dz+zed[c].x*dx*dx)/(dx*dx+dz*dz);
+                        nearx=((zed[c].p.z-z)*dx*dz+x*dz*dz+zed[c].p.x*dx*dx)/(dx*dx+dz*dz);
                         const float p=(nearx-x)/dx;
                         nearz=z+dz*p;
                         neary=y+dy*p;
                     }else{
-                        nearz=((zed[c].x-x)*dx*dz+z*dx*dx+zed[c].z*dz*dz)/(dx*dx+dz*dz);
+                        nearz=((zed[c].p.x-x)*dx*dz+z*dx*dx+zed[c].p.z*dz*dz)/(dx*dx+dz*dz);
                         const float p=(nearz-z)/dz;
                         nearx=x+dx*p;
                         neary=y+dy*p;
                     }
-                    const float dist=sqrtf(sqr(zed[c].x-nearx)+sqr(zed[c].z-nearz));
+                    const float dist=sqrtf(sqr(zed[c].p.x-nearx)+sqr(zed[c].p.z-nearz));
                     //this neary check isn't entirely accurate
                     if(dist<0.80f && neary<2.8f+(0.80f-dist)*abs(dy/sqrtf(dx*dx+dz*dz))){
                         return c;
                     }
-                }
+                }*/
                 c=zed[c].cnext;
             }
         }
         return -1;
     }
 
-    void killZed(const int i){
-        const float RAD=0.80f;
-        int count=12;
-        for(int j=0;j<MAX_PARTICLES;j++)
-            if(particles[j].x==-1){
-                particles[j].x=zed[i].x+rng.rand(RAD*2)-RAD;
-                particles[j].y=zed[i].y+rng.rand(2.8f);
-                particles[j].z=zed[i].z+rng.rand(RAD*2)-RAD;
-                particles[j].age=rng.rand(0.20f)+0.20f;
-                if((--count)<=0)
-                    break;
-            }
-        /*
-        if(zed[i].cnext!=-1)
-            zed[zed[i].cnext].cprev=zed[i].cprev;
-        if(zed[i].cprev!=-1)
-            zed[zed[i].cprev].cnext=zed[i].cnext;
-        else
-            cols[zed[i].iz*32+zed[i].ix]=zed[i].cnext;
-        zed[i].cprev=-1;
-        zed[i].cnext=-1;
-        */
-        zed[i].state=Z_DEAD;
+    void hitZed(const int i){
+        if(zed[i].state==Z_DEAD){
+            /*const float RAD=0.80f;
+            int count=12;
+            for(int j=0;j<MAX_PARTICLES;j++)
+                if(particles[j].p.x==-1){
+                    particles[j].p.x=zed[i].p.x+rng.rand(RAD*2)-RAD;
+                    particles[j].p.y=zed[i].p.y+rng.rand(2.8f);
+                    particles[j].p.z=zed[i].p.z+rng.rand(RAD*2)-RAD;
+                    particles[j].age=rng.rand(0.20f)+0.20f;
+                    if((--count)<=0)
+                        break;
+                }*/
+            if(zed[i].cnext!=-1)
+                zed[zed[i].cnext].cprev=zed[i].cprev;
+            if(zed[i].cprev!=-1)
+                zed[zed[i].cprev].cnext=zed[i].cnext;
+            else
+                cols[zed[i].iz*32+zed[i].ix]=zed[i].cnext;
+            zed[i].cprev=-1;
+            zed[i].cnext=-1;
+            zed[i].state=Z_NONE;
+        }else{
+            zed[i].state=Z_DEAD;
+        }
     }
 
     int updateFrame(){
-        //const float GRAVITY=25.0f;
-        const float GRAVITY=15.0f;
+        const float GRAVITY=30.0f;
         const float WALK_SPEED=10.0f;
+        const float JUMP_SPEED=10.0f;
+        const float CLIMB_SPEED=3.0f;
         const float BULLET_SPEED=70.0f;
-        const float BULLET_SPREAD=0.0f;
         const float SHOOT_DELAY=0.20f;
         const float PARTICLE_AGE=0.10f;
         const float PARTICLE_INTERVAL=1.0f;
         const float PL_RAD=0.80f;
         const float ZED_RANGE=32.0f;
+        const int ZED_DAMAGE=30;
 
         const Uint32 time=SDL_GetTicks();
         static Uint32 timeLast=time;
@@ -507,6 +709,8 @@ namespace Game{
         bool K_FIRE=mb&SDL_BUTTON(1);
         if(CAPTURE_VIDEO){
             if(REPLAYING){
+                pl[0].lookr=replay->f[frames].lookr;
+                pl[0].lookp=replay->f[frames].lookp;
                 K_LEFT    =replay->f[frames].keys& KB_LEFT;
                 K_RIGHT   =replay->f[frames].keys& KB_RIGHT;
                 K_FORWARD =replay->f[frames].keys& KB_FORWARD;
@@ -514,8 +718,6 @@ namespace Game{
                 K_JUMP    =replay->f[frames].keys& KB_JUMP;
                 K_USE     =replay->f[frames].keys& KB_USE;
                 K_FIRE    =replay->f[frames].keys& KB_FIRE;
-                pl[0].lookr=replay->f[frames].lookr;
-                pl[0].lookp=replay->f[frames].lookp;
             }else{
                 replay->f[frames].lookr=pl[0].lookr;
                 replay->f[frames].lookp=pl[0].lookp;
@@ -540,32 +742,41 @@ namespace Game{
             dirx*=0.70710678;
             diry*=0.70710678;
         }
-        pl[0].x+=WALK_SPEED*(diry*cosf(pl[0].lookr)-dirx*sinf(pl[0].lookr))*t;
-        pl[0].z+=WALK_SPEED*(dirx*cosf(pl[0].lookr)+diry*sinf(pl[0].lookr))*t;
-        if(pl[0].y>0){
-            pl[0].y-=pl[0].vy*t;
-            pl[0].vy-=GRAVITY*t;
-            if(pl[0].y<=0){
-                pl[0].y=0;
-                pl[0].vy=0;
-            }
+        const float lasty=pl[0].p.y;
+        pl[0].v.x=WALK_SPEED*(diry*cosf(pl[0].lookr)-dirx*sinf(pl[0].lookr));
+        pl[0].v.z=WALK_SPEED*(dirx*cosf(pl[0].lookr)+diry*sinf(pl[0].lookr));
+        pl[0].p.adds(pl[0].v,t);
+        if(pl[0].p.y>0){
+            pl[0].v.y-=GRAVITY*t;
+        }else{
+            pl[0].p.y=0;
+            pl[0].v.y=0;
+            pl[0].onground=true;
         }
-        collideCharacter(-1,pl[0].x,pl[0].z,PL_RAD);
-        camx=pl[0].x;
-        camy=pl[0].y;
-        camz=pl[0].z;
-        const float aimx=cosf(pl[0].lookr)*cosf(pl[0].lookp);
-        const float aimy=sinf(pl[0].lookp);
-        const float aimz=sinf(pl[0].lookr)*cosf(pl[0].lookp);
-        lookx=camx+aimx;
-        looky=camy+aimy;
-        lookz=camz+aimz;
+        if(collideCharacter(-1,pl[0].p.x,pl[0].p.y,pl[0].p.z,PL_RAD)==2){
+            if(pl[0].v.y<CLIMB_SPEED)
+                pl[0].v.y=CLIMB_SPEED;
+            pl[0].onground=true;
+        }
+        if(K_JUMP && pl[0].onground){
+            pl[0].v.y=JUMP_SPEED;
+            pl[0].p.y+=0.01f;
+            pl[0].onground=false;
+        }
+        if(pl[0].p.y<lasty)
+            pl[0].onground=false;
+        cam.set(pl[0].p);
+        cam.y+=2.5f;
+        const vect aim(cosf(pl[0].lookr)*cosf(pl[0].lookp),
+                        sinf(pl[0].lookp),
+                        sinf(pl[0].lookr)*cosf(pl[0].lookp));
+        look.set(cam).add(aim);
 
         //pickup
         if(K_USE && (pl[0].health<100 || pl[0].ammo<120))
             for(int i=0;i<MAX_ZEDS;i++)
                 if((zed[i].state==Z_HEALTH || zed[i].state==Z_AMMO)
-                    && sqr(pl[0].x-zed[i].x)+sqr(pl[0].z-zed[i].z)<PL_RAD*PL_RAD*4){
+                    && sqr(pl[0].p.x-zed[i].p.x)+sqr(pl[0].p.z-zed[i].p.z)<PL_RAD*PL_RAD*4){
                     if(zed[i].state==Z_HEALTH){
                         if(pl[0].health<100){
                             pl[0].health+=25;
@@ -591,13 +802,11 @@ namespace Game{
             pl[0].shootdelay-=t;
         if(pl[0].ammo>0 && K_FIRE && pl[0].shootdelay<=0){
             for(int i=0;i<MAX_BULLETS;i++)
-                if(bullets[i].x==-1){
-                    bullets[i].x=pl[0].x+aimx*0.75f;
-                    bullets[i].y=pl[0].y+aimy*0.75f-0.3f;
-                    bullets[i].z=pl[0].z+aimz*0.75f;
-                    bullets[i].vx=(aimx+rng.rand(BULLET_SPREAD)-rng.rand(BULLET_SPREAD))*BULLET_SPEED;
-                    bullets[i].vy=(aimy+rng.rand(BULLET_SPREAD)-rng.rand(BULLET_SPREAD))*BULLET_SPEED+0.15f*GRAVITY;
-                    bullets[i].vz=(aimz+rng.rand(BULLET_SPREAD)-rng.rand(BULLET_SPREAD))*BULLET_SPEED;
+                if(bullets[i].p.x==-1){
+                    bullets[i].p.set(pl[0].p).adds(aim,0.75f);
+                    bullets[i].p.y+=2.5f-0.3f;
+                    bullets[i].v.set(pl[0].v).adds(aim,BULLET_SPEED);
+                    bullets[i].v.y+=0.15f*GRAVITY;
                     pl[0].ammo--;
                     break;
                 }
@@ -606,48 +815,42 @@ namespace Game{
 
         //bullets
         for(int i=0;i<MAX_BULLETS;i++)
-            if(bullets[i].x!=-1){
-                const float dx=bullets[i].vx*t;
-                const float dy=bullets[i].vy*t;
-                const float dz=bullets[i].vz*t;
+            if(bullets[i].p.x!=-1){
+                const float dx=bullets[i].v.x*t;
+                const float dy=bullets[i].v.y*t;
+                const float dz=bullets[i].v.z*t;
                 int c;
-                if((c=collideLine(bullets[i].x,bullets[i].y,bullets[i].z,dx,dy,dz))!=-1){
+                if((c=collideLine(bullets[i].p.x,bullets[i].p.y,bullets[i].p.z,dx,dy,dz))!=-1){
                     if(c>=0){ //hit zed
-                        killZed(c);
+                        hitZed(c);
                     }
                     for(int j=0;j<MAX_PARTICLES;j++)
-                        if(particles[j].x==-1){
-                            particles[j].x=bullets[i].x;
-                            particles[j].y=bullets[i].y;
-                            particles[j].z=bullets[i].z;
+                        if(particles[j].p.x==-1){
+                            particles[j].p.set(bullets[i].p);
                             particles[j].age=PARTICLE_AGE*4.0f;
                             break;
                         }
-                    bullets[i].x=-1;
+                    bullets[i].p.x=-1;
                     continue;
                 }
-                bullets[i].vy-=GRAVITY*t;
+                bullets[i].v.y-=GRAVITY*t;
                 float dist=sqrtf(dx*dx+dy*dy+dz*dz);
                 for(int j=0;j<MAX_PARTICLES;j++)
-                    if(particles[j].x==-1){
-                        particles[j].x=bullets[i].x+dx*dist;
-                        particles[j].y=bullets[i].y+dy*dist;
-                        particles[j].z=bullets[i].z+dz*dist;
+                    if(particles[j].p.x==-1){
+                        particles[j].p.set(bullets[i].p).add(dx*dist,dy*dist,dz*dist);
                         particles[j].age=PARTICLE_AGE;
                         if((dist-=PARTICLE_INTERVAL)<=0)
                             break;
                     }
-                bullets[i].x+=dx;
-                bullets[i].y+=dy;
-                bullets[i].z+=dz;
+                bullets[i].p.add(dx,dy,dz);
             }
 
         //particles
         for(int i=0;i<MAX_PARTICLES;i++)
-            if(particles[i].x!=-1){
+            if(particles[i].p.x!=-1){
                 particles[i].age-=t;
                 if(particles[i].age<0)
-                    particles[i].x=-1;
+                    particles[i].p.x=-1;
             }
 
         //zeds
@@ -656,36 +859,65 @@ namespace Game{
                 case Z_DEAD: break;
                 case Z_WANDERING: {
                     //wander aimlessly
-                    zed[i].x+=WALK_SPEED*1.5f*cosf(zed[i].rot)*t;
-                    zed[i].z+=WALK_SPEED*1.5f*sinf(zed[i].rot)*t;
-                    if(collideCharacter(i,zed[i].x,zed[i].z,PL_RAD)){
-                        if(sqr(pl[0].x-zed[i].x)+sqr(pl[0].z-zed[i].z)<ZED_RANGE*ZED_RANGE){
+                    zed[i].p.x+=WALK_SPEED*1.5f*cosf(zed[i].rot)*t;
+                    zed[i].p.z+=WALK_SPEED*1.5f*sinf(zed[i].rot)*t;
+                    switch(collideCharacter(i,zed[i].p.x,zed[i].p.y,zed[i].p.z,PL_RAD)){
+                    case 0:
+                        if(sqr(pl[0].p.x-zed[i].p.x)+sqr(pl[0].p.z-zed[i].p.z)<2.56f){
+                            const float dist=sqrtf(sqr(zed[i].p.x-pl[0].p.x)+sqr(zed[i].p.z-pl[0].p.z));
+                            zed[i].p.x+=(1.60f-dist)*(zed[i].p.x-pl[0].p.x)/dist;
+                            zed[i].p.z+=(1.60f-dist)*(zed[i].p.z-pl[0].p.z)/dist;
+                            zed[i].rot=rng.rand(M_PI*2);
+                        }
+                        break;
+                    case 2:
+                        if(zed[i].v.y<CLIMB_SPEED)
+                            zed[i].v.y=CLIMB_SPEED;
+                        break;
+                    default:
+                        if(sqr(pl[0].p.x-zed[i].p.x)+sqr(pl[0].p.z-zed[i].p.z)<ZED_RANGE*ZED_RANGE){
                             zed[i].state=Z_ATTACKING;
-                            zed[i].rot=atan2f(pl[0].z-zed[i].z,pl[0].x-zed[i].x);
+                            zed[i].rot=atan2f(pl[0].p.z-zed[i].p.z,pl[0].p.x-zed[i].p.x);
                         }else{
                             zed[i].rot=rng.rand(M_PI*2);
                         }
-                    }else if(sqr(pl[0].x-zed[i].x)+sqr(pl[0].z-zed[i].z)<2.56f){
-                        const float dist=sqrtf(sqr(zed[i].x-pl[0].x)+sqr(zed[i].z-pl[0].z));
-                        zed[i].x+=(1.60f-dist)*(zed[i].x-pl[0].x)/dist;
-                        zed[i].z+=(1.60f-dist)*(zed[i].z-pl[0].z)/dist;
-                        zed[i].rot=rng.rand(M_PI*2);
+                    }
+                    if(zed[i].p.y>=0){
+                        zed[i].p.y+=zed[i].v.y*t;
+                        zed[i].v.y-=GRAVITY*t;
+                    }else{
+                        zed[i].p.y=0;
+                        zed[i].v.y=0;
                     }
                     } break;
                 case Z_ATTACKING: {
-                    zed[i].x+=WALK_SPEED*1.5f*cosf(zed[i].rot)*t;
-                    zed[i].z+=WALK_SPEED*1.5f*sinf(zed[i].rot)*t;
-                    if(sqr(pl[0].x-zed[i].x)+sqr(pl[0].z-zed[i].z)<2.56f){
-                        pl[0].health-=30;
+                    zed[i].p.x+=WALK_SPEED*1.5f*cosf(zed[i].rot)*t;
+                    zed[i].p.z+=WALK_SPEED*1.5f*sinf(zed[i].rot)*t;
+                    if(sqr(pl[0].p.x-zed[i].p.x)+sqr(pl[0].p.z-zed[i].p.z)<2.56f){
+                        pl[0].health-=ZED_DAMAGE;
                         if(pl[0].health<0)
                             respawnPlayer(0);
                         updateHealthHud();
                         zed[i].state=Z_WANDERING;
                         zed[i].rot=rng.rand(M_PI*2);
                     }
-                    if(collideCharacter(i,zed[i].x,zed[i].z,PL_RAD)){
+                    switch(collideCharacter(i,zed[i].p.x,zed[i].p.y,zed[i].p.z,PL_RAD)){
+                    case 0:
+                        break;
+                    case 2:
+                        if(zed[i].v.y<CLIMB_SPEED)
+                            zed[i].v.y=CLIMB_SPEED;
+                        break;
+                    default:
                         zed[i].state=Z_WANDERING;
                         zed[i].rot=rng.rand(M_PI*2);
+                    }
+                    if(zed[i].p.y>=0){
+                        zed[i].p.y+=zed[i].v.y*t;
+                        zed[i].v.y-=GRAVITY*t;
+                    }else{
+                        zed[i].p.y=0;
+                        zed[i].v.y=0;
                     }
                     } break;
                 case Z_HEALTH:
@@ -775,12 +1007,29 @@ namespace Game{
 
     int drawZeds(){
         const float ZEDW=0.80f;
+        const float ZEDW2=0.565685425f;
         const float HW=0.30;
         for(int i=0;i<MAX_ZEDS;i++) if(zed[i].state!=Z_NONE){
             glPushMatrix();
-            glTranslatef(zed[i].x,zed[i].y,zed[i].z);
-            glRotatef(zed[i].rot*180.0f/M_PI,0.0f,-1.0f,0.0f);
+            glTranslatef(zed[i].p.x,zed[i].p.y,zed[i].p.z);
+            glRotatef(-zed[i].rot*180.0f/M_PI,0.0f,1.0f,0.0f);
             switch(zed[i].state){
+            case Z_DEAD:
+                glColor3f(0.35f,0.35f,0.35f);
+                glBegin(GL_QUAD_STRIP);
+                glVertex3f(-1.4f,0.0f,+ZEDW2);    glVertex3f(+1.4f,0.0f,+ZEDW2);
+                glVertex3f(-1.4f,ZEDW2*2,+ZEDW2); glVertex3f(+1.4f,ZEDW2*2,+ZEDW2);
+                glVertex3f(-1.4f,ZEDW2*2,-ZEDW2); glVertex3f(+1.4f,ZEDW2*2,-ZEDW2);
+                glVertex3f(-1.4f,0.0f,-ZEDW2);    glVertex3f(+1.4f,0.0f,-ZEDW2);
+                glVertex3f(-1.4f,0.0f,+ZEDW2);    glVertex3f(+1.4f,0.0f,+ZEDW2);
+                glEnd();
+                glBegin(GL_QUADS);
+                glVertex3f(-1.4f,0.0f,+ZEDW2);    glVertex3f(-1.4f,ZEDW2*2,+ZEDW2);
+                glVertex3f(-1.4f,ZEDW2*2,-ZEDW2); glVertex3f(-1.4f,0.0f,-ZEDW2);
+                glVertex3f(+1.4f,0.0f,+ZEDW2);    glVertex3f(+1.4f,ZEDW2*2,+ZEDW2);
+                glVertex3f(+1.4f,ZEDW2*2,-ZEDW2); glVertex3f(+1.4f,0.0f,-ZEDW2);
+                glEnd();
+                break;
             case Z_HEALTH:
                 glColor3f(0.76f,0.76f,0.76f);
                 glScalef(HW,HW,HW);
@@ -839,11 +1088,17 @@ namespace Game{
             default:
                 glColor3f(0.35f,0.35f,0.35f);
                 glBegin(GL_QUAD_STRIP);
-                glVertex3f(ZEDW,0.0f,0.0f);  glVertex3f(ZEDW,2.8f,0.0f);
-                glVertex3f(0.0f,0.0f,ZEDW);  glVertex3f(0.0f,2.8f,ZEDW);
+                glVertex3f(+ZEDW,0.0f,0.0f); glVertex3f(+ZEDW,2.8f,0.0f);
+                glVertex3f(0.0f,0.0f,+ZEDW); glVertex3f(0.0f,2.8f,+ZEDW);
                 glVertex3f(-ZEDW,0.0f,0.0f); glVertex3f(-ZEDW,2.8f,0.0f);
                 glVertex3f(0.0f,0.0f,-ZEDW); glVertex3f(0.0f,2.8f,-ZEDW);
-                glVertex3f(ZEDW,0.0f,0.0f);  glVertex3f(ZEDW,2.8f,0.0f);
+                glVertex3f(+ZEDW,0.0f,0.0f); glVertex3f(+ZEDW,2.8f,0.0f);
+                glEnd();
+                glBegin(GL_QUADS);
+                glVertex3f(+ZEDW,0.0f,0.0f); glVertex3f(0.0f,0.0f,+ZEDW);
+                glVertex3f(-ZEDW,0.0f,0.0f); glVertex3f(0.0f,0.0f,-ZEDW);
+                glVertex3f(+ZEDW,2.8f,0.0f); glVertex3f(0.0f,2.8f,+ZEDW);
+                glVertex3f(-ZEDW,2.8f,0.0f); glVertex3f(0.0f,2.8f,-ZEDW);
                 glEnd();
                 break;
             }
@@ -856,10 +1111,10 @@ namespace Game{
 	glEnable(GL_CULL_FACE);
         glColor3f(0.76f,0.76f,0.76f);
         for(int i=0;i<MAX_PARTICLES;i++)
-            if(particles[i].x!=-1){
-                const float x=particles[i].x;
-                const float y=particles[i].y;
-                const float z=particles[i].z;
+            if(particles[i].p.x!=-1){
+                const float x=particles[i].p.x;
+                const float y=particles[i].p.y;
+                const float z=particles[i].p.z;
                 const float S=0.60f*particles[i].age;
                 glBegin(GL_QUAD_STRIP);
                 glVertex3f(x+S,y+S,z+S); glVertex3f(x+S,y-S,z+S); glVertex3f(x+S,y+S,z-S); glVertex3f(x+S,y-S,z-S);
@@ -882,7 +1137,7 @@ namespace Game{
 	gluPerspective(FOV,(float)WINDOW_W/(float)WINDOW_H,0.25f,1000.0f);
 	glMatrixMode(GL_MODELVIEW);
 	glLoadIdentity();
-        gluLookAt(camx,camy,camz,lookx,looky,lookz,0.0f,1.0f,0.0f);
+        gluLookAt(cam.x,cam.y,cam.z,look.x,look.y,look.z,0.0f,1.0f,0.0f);
 
 	glEnable(GL_DEPTH_TEST);
         drawBuildings();
@@ -923,90 +1178,7 @@ namespace Game{
             glVertex2f(WINDOW_W-POSX-(i%30)*4,POSY+(i/30)*10+8);
         }
         glEnd();
-
         glDisable(GL_BLEND);
-
-        /*
-        const GLfloat wallw=0.075f;
-	glEnable(GL_CULL_FACE);
-        glBegin(GL_QUADS);
-        for(int iy=1;iy<31;iy++)
-        for(int ix=1;ix<31;ix++)
-            if(map[iy*32+ix]&INSIDE_BIT){
-                //X wall
-                glColor3f(0.75f,0.75f,0.75f);
-                glVertex3f(ix+1.0f-wallw,0.0f,iy);
-                glVertex3f(ix+1.0f-wallw,0.0f,iy+1.0f);
-                glVertex3f(ix+1.0f,0.0f,iy+1.0f);
-                glVertex3f(ix+1.0f,0.0f,iy);
-                //Z wall
-                glVertex3f(ix,0.0f,iy+1.0f);
-                glVertex3f(ix+1.0f,0.0f,iy+1.0f);
-                glVertex3f(ix+1.0f,0.0f,iy+1.0f-wallw);
-                glVertex3f(ix,0.0f,iy+1.0f-wallw);
-            }
-        for(int iy=0;iy<31;iy++)
-        for(int ix=0;ix<31;ix++){
-            //X wall
-            if(map[iy*32+ix+1]&INSIDE_BIT){
-                glColor3f(0.75f,0.75f,0.75f);
-                glVertex3f(ix+1.0f-wallw,0.0f,iy-wallw);
-                glVertex3f(ix+1.0f-wallw,0.0f,iy+1.0f);
-                glVertex3f(ix+1.0f,0.0f,iy+1.0f);
-                glVertex3f(ix+1.0f,0.0f,iy-wallw);
-            }
-            //Z wall
-            if(map[iy*32+ix+32]&INSIDE_BIT){
-                glColor3f(0.75f,0.75f,0.75f);
-                glVertex3f(ix,0.0f,iy+1.0f);
-                glVertex3f(ix+1.0f,0.0f,iy+1.0f);
-                glVertex3f(ix+1.0f,0.0f,iy+1.0f-wallw);
-                glVertex3f(ix,0.0f,iy+1.0f-wallw);
-            }
-            //doorways
-            if(map[iy*32+ix]&DOORX_BIT){
-                glColor3f(0.0f,0.0f,0.0f);
-                glVertex3f(ix+1.0f-wallw,0.0f,iy+0.25f);
-                glVertex3f(ix+1.0f-wallw,0.0f,iy+0.5f);
-                glVertex3f(ix+1.0f,0.0f,iy+0.5f);
-                glVertex3f(ix+1.0f,0.0f,iy+0.25f);
-            }
-            if(map[iy*32+ix]&DOORZ_BIT){
-                glColor3f(0.0f,0.0f,0.0f);
-                glVertex3f(ix+0.25f,0.0f,iy+1.0f);
-                glVertex3f(ix+0.5f,0.0f,iy+1.0f);
-                glVertex3f(ix+0.5f,0.0f,iy+1.0f-wallw);
-                glVertex3f(ix+0.25f,0.0f,iy+1.0f-wallw);
-            }
-        }
-        glEnd();
-	glDisable(GL_CULL_FACE);
-        */
-
-        /*
-	glEnable(GL_DEPTH_TEST);
-        const GLfloat dist=6.0f;
-        glBegin(GL_QUADS);
-            glColor3f(0.75f,0.0f,0.0f);
-            glVertex3f(dist,3.0f,1.0f); glVertex3f(dist,2.0f,0.0f);
-            glVertex3f(dist,0.0f,2.0f); glVertex3f(dist,1.0f,3.0f);
-            glVertex3f(dist,3.0f,2.0f); glVertex3f(dist,1.0f,0.0f);
-            glVertex3f(dist,0.0f,1.0f); glVertex3f(dist,2.0f,3.0f);
-            glColor3f(0.0f,0.75f,0.0f);
-            glVertex3f(-3.0f,dist,1.0f); glVertex3f(-2.0f,dist,0.0f);
-            glVertex3f(-1.0f,dist,1.0f); glVertex3f(-2.0f,dist,2.0f);
-            glVertex3f(-3.0f,dist,2.0f); glVertex3f(-1.0f,dist,0.0f);
-            glVertex3f(-0.0f,dist,1.0f); glVertex3f(-2.0f,dist,3.0f);
-            glColor3f(0.0f,0.0f,0.75f);
-            glVertex3f(-0.0f,3.0f,dist); glVertex3f(-0.0f,2.0f,dist);
-            glVertex3f(-3.0f,2.0f,dist); glVertex3f(-3.0f,3.0f,dist);
-            glVertex3f(-0.0f,1.0f,dist); glVertex3f(-0.0f,0.0f,dist);
-            glVertex3f(-3.0f,0.0f,dist); glVertex3f(-3.0f,1.0f,dist);
-            glVertex3f(-2.0f,3.0f,dist); glVertex3f(-0.0f,1.0f,dist);
-            glVertex3f(-1.0f,0.0f,dist); glVertex3f(-3.0f,2.0f,dist);
-        glEnd();
-	glDisable(GL_DEPTH_TEST);
-        */
 
         SDL_GL_SwapBuffers();
         frames++;
