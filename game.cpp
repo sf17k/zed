@@ -4,23 +4,23 @@
 #include <math.h>
 #include "MersenneTwister.h"
 #include "SOIL.h"
+#include "game.h"
+#include "net.h"
 
 using namespace std;
 
 namespace Game{
 
-    const bool CAPTURE_VIDEO=false;
     const bool FULLSCREEN=false;
-    const int WINDOW_W=CAPTURE_VIDEO?640:800;
-    const int WINDOW_H=CAPTURE_VIDEO?480:600;
+    const int WINDOW_W=800;
+    const int WINDOW_H=600;
     const float FOV=105.0f;
     const int CENTER_X=WINDOW_W/2;
     const int CENTER_Y=WINDOW_H/2;
-    const int CAPTURE_BLUR=3;
-    const double CAPTURE_STEP=1.0/25.0/CAPTURE_BLUR;
 
+    bool isserver=false;
     bool sdl_started=false;
-    bool REPLAYING=false;
+    int gamestate=0;
 
     SDL_Surface *screen=NULL;
     bool isKeyPressed[SDLK_LAST];
@@ -65,6 +65,7 @@ namespace Game{
     };
 
     int frames=0;
+    int plid=-1; //local player id
     vect cam;
     vect look;
     float sensitivity=0.0010f;
@@ -95,15 +96,17 @@ namespace Game{
         float shootdelay;
         int health,ammo;
         bool onground;
+        unsigned char keys;
+        unsigned char state;
     }pl[MAX_PLAYERS];
 
     struct Zed{
-        unsigned char state;
         vect p;
         vect v;
         float rot;
         int ix,iz;
         int cnext,cprev;
+        unsigned char state;
     }zed[MAX_ZEDS];
 
     struct Bullet{
@@ -126,89 +129,129 @@ namespace Game{
         KB_FIRE=64
     };
 
-    struct FrameData{
-        float lookr,lookp;
-        unsigned char keys;
-    };
+    void setKeys(int i, unsigned char keys){
+        if(pl[i].state)
+            pl[i].keys=keys;
+    }
 
-    struct ReplayData{
-        long unsigned int rngstate[MTRand::SAVE];
-        int numframes;
-        FrameData f[75*60*10]; //TODO: check for overflow
-    };
+    void setAim(int i, unsigned short aimr, unsigned short aimp){
+        if(pl[i].state){
+            pl[i].lookr=(float)aimr*M_PI*2.0f/65536.0f;
+            pl[i].lookp=(float)aimp*M_PI/65536.0f-M_PI*0.5f;
+            if(pl[i].lookr>M_PI*2) pl[i].lookr-=M_PI*2;
+            if(pl[i].lookr<0) pl[i].lookr+=M_PI*2;
+            if(pl[i].lookp>0.49f*M_PI) pl[i].lookp=0.49f*M_PI;
+            if(pl[i].lookp<-0.49f*M_PI) pl[i].lookp=-0.49f*M_PI;
+        }
+    }
 
-    ReplayData* replay=NULL;
+    void setClientID(int id){
+        plid=id;
+        if(plid<0 || plid>=MAX_PLAYERS)
+            plid=-1;
+        gamestate=1;
+        pl[plid].state=1;
+    }
+
+    unsigned short getAimr(int i){
+        return (unsigned short)(pl[i].lookr*65536.0f/(M_PI*2.0f));
+    }
+
+    unsigned short getAimp(int i){
+        return (unsigned short)((pl[i].lookp+M_PI*0.5f)*65536.0f/M_PI);
+    }
+
+    unsigned char* getMap(){
+        return (unsigned char*)map;
+    }
+
+    int getClientUpdate(unsigned char *keys, unsigned short *aimr, unsigned short *aimp){
+        if(plid==-1)
+            return -1;
+        *keys=pl[plid].keys;
+        *aimr=getAimr(plid);
+        *aimp=getAimp(plid);
+        return 0;
+    }
 
     void updateHealthHud(){
-        const float r=(float)pl[0].health/100.0f;
-        for(int i=0;i<400;i++)
-            healthhud[i]=rng()<r?1:0;
+        if(plid!=-1){
+            const float r=(float)pl[plid].health/100.0f;
+            for(int i=0;i<400;i++)
+                healthhud[i]=rng()<r?1:0;
+        }
+    }
+
+    int getPlayerUpdate(int i, unsigned short *pv, unsigned char* kha){
+        if(i<0 || i>=MAX_PLAYERS || pl[i].state==0)
+            return -1;
+        pv[0]=(unsigned short)(pl[i].p.x*65536.0f/512.0f);
+        pv[1]=(unsigned short)(pl[i].p.y*65536.0f/512.0f);
+        pv[2]=(unsigned short)(pl[i].p.z*65536.0f/512.0f);
+        pv[3]=(signed short)(pl[i].v.x*4.0f);
+        pv[4]=(signed short)(pl[i].v.y*4.0f);
+        pv[5]=(signed short)(pl[i].v.z*4.0f);
+        pv[6]=getAimr(i);
+        pv[7]=getAimp(i);
+        kha[0]=pl[i].keys;
+        kha[1]=(signed char)pl[i].health;
+        kha[2]=(signed char)pl[i].ammo;
+        return 0;
+    }
+
+    int setPlayerUpdate(int i, const unsigned short *pv, const unsigned char* kha){
+        if(i<0 || i>=MAX_PLAYERS)
+            return -1;
+        pl[i].p.set(
+        ((float)pv[0])*512.0f/65536.0f,
+        ((float)pv[1])*512.0f/65536.0f,
+        ((float)pv[2])*512.0f/65536.0f);
+        pl[i].v.set(
+        ((float)((signed short)pv[3]))/4.0f,
+        ((float)((signed short)pv[4]))/4.0f,
+        ((float)((signed short)pv[5]))/4.0f);
+        if(i!=plid){
+            setAim(i,pv[6],pv[7]);
+            pl[i].keys=kha[0];
+        }
+        pl[i].health=(signed char)kha[1];
+        pl[i].ammo=(signed char)kha[2];
+        pl[i].state=1;
+        if(i==plid)
+            updateHealthHud();
+        return 0;
     }
 
     void respawnPlayer(int p){
-        cam.set(pl[p].p.set(248.0f,0.0f,248.0f));
-        cam.y+=2.5f;
+        pl[p].p.set(248.0f,0.0f,248.0f);
         pl[p].v.set(0.0f,0.0f,0.0f);
         pl[p].lookr=0.0f;
         pl[p].lookp=0.0f;
-        look.set(0.0f,0.0f,0.0f);
         pl[p].shootdelay=0.5f;
         pl[p].health=100;
         pl[p].ammo=30;
         pl[p].onground=true;
-        updateHealthHud();
+        pl[p].keys=0;
+        pl[p].state=1;
+        if(p==plid){
+            cam.set(pl[p].p);
+            cam.y+=2.5f;
+            look.set(0.0f,0.0f,0.0f);
+            updateHealthHud();
+        }
     }
 
-    int init(){
-        //sdl
-        if(!sdl_started){
-            sdl_started=true;
-            if(SDL_Init(SDL_INIT_VIDEO)!=0){
-                cerr<<"unable to initialize SDL: "<<SDL_GetError()<<endl;
-                return 1;
-            }
-            atexit(SDL_Quit);
-            SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
-            screen=SDL_SetVideoMode(WINDOW_W,WINDOW_H,32,SDL_OPENGL|(FULLSCREEN?SDL_FULLSCREEN:0));
-            if(screen==NULL){
-                cerr<<"unable to set video mode: "<<SDL_GetError()<<endl;
-                return 1;
-            }
-            SDL_WM_SetCaption("zed","zed");
-            SDL_ShowCursor(SDL_DISABLE);
-        }
+    void removePlayer(int p){
+        pl[p].p.set(0.0f,0.0f,0.0f);
+        pl[p].v.set(0.0f,0.0f,0.0f);
+        pl[p].keys=0;
+        pl[p].state=0;
+    }
 
-        for(int i=0;i<SDLK_LAST;i++) isKeyPressed[i]=false;
-        for(int i=0;i<SDLK_LAST;i++) isKeyDown[i]=false;
-
-        //opengl
-	glShadeModel(GL_FLAT);
-	glClearDepth(1.0f);
-	glFrontFace(GL_CCW);
-	glCullFace(GL_BACK);
-        glLineWidth(2);
-        glPointSize(2);
-
-	const float fogColor[]={0.0f,0.0f,0.0f,1.0f};
-	const float fogDensity[]={0.02f};
-	glFogfv(GL_FOG_COLOR,fogColor);
-	glFogfv(GL_FOG_DENSITY,fogDensity);
-	glEnable(GL_FOG);
-
-	glClearColor(0.0f,0.0f,0.0f,0.0f);
-        glViewport(0,0,WINDOW_W,WINDOW_H);
+    int initServer(){
+        isserver=true;
 
         //game vars
-        if(CAPTURE_VIDEO){
-            if(REPLAYING){
-                replay->numframes=frames;
-                rng.load(&replay->rngstate[0]);
-            }else{
-                if(replay) delete replay;
-                replay=new ReplayData();
-                rng.save(&replay->rngstate[0]);
-            }
-        }
         frames=0;
 
         if(map) delete[] map;
@@ -284,6 +327,7 @@ namespace Game{
                 }
             }
         //zeds
+/*
         for(int iz=1;iz<31;iz++)
         for(int ix=1;ix<31;ix++){
             if(abs(ix-15)+abs(iz-15)<3)
@@ -300,13 +344,81 @@ namespace Game{
             if(c+1<MAX_ZEDS)
                 c++;
         }
+*/
 
         for(int i=0;i<MAX_BULLETS;i++)
             bullets[i].p.x=-1;
         for(int i=0;i<MAX_PARTICLES;i++)
             particles[i].p.x=-1;
+        for(int i=0;i<MAX_PLAYERS;i++)
+            pl[i].state=0;
 
-        respawnPlayer(0);
+        return 0;
+    }
+
+    int initClient(){
+        isserver=false;
+
+        //sdl
+        if(!sdl_started){
+            sdl_started=true;
+            if(SDL_Init(SDL_INIT_VIDEO)!=0){
+                cerr<<"unable to initialize SDL: "<<SDL_GetError()<<endl;
+                return 1;
+            }
+            atexit(SDL_Quit);
+            SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
+            screen=SDL_SetVideoMode(WINDOW_W,WINDOW_H,32,SDL_OPENGL|(FULLSCREEN?SDL_FULLSCREEN:0));
+            if(screen==NULL){
+                cerr<<"unable to set video mode: "<<SDL_GetError()<<endl;
+                return 1;
+            }
+            SDL_WM_SetCaption("zed","zed");
+            SDL_ShowCursor(SDL_DISABLE);
+        }
+
+        for(int i=0;i<SDLK_LAST;i++) isKeyPressed[i]=false;
+        for(int i=0;i<SDLK_LAST;i++) isKeyDown[i]=false;
+
+        //opengl
+	glShadeModel(GL_FLAT);
+	glClearDepth(1.0f);
+	glFrontFace(GL_CCW);
+	glCullFace(GL_BACK);
+        glLineWidth(2);
+        glPointSize(2);
+
+	const float fogColor[]={0.0f,0.0f,0.0f,1.0f};
+	const float fogDensity[]={0.02f};
+	glFogfv(GL_FOG_COLOR,fogColor);
+	glFogfv(GL_FOG_DENSITY,fogDensity);
+	glEnable(GL_FOG);
+
+	glClearColor(0.0f,0.0f,0.0f,0.0f);
+        glViewport(0,0,WINDOW_W,WINDOW_H);
+
+        //game vars
+        frames=0;
+        plid=-1;
+
+        if(map) delete[] map;
+        map=new char[32*32];
+        if(cols) delete[] cols;
+        cols=new int[32*32];
+        //clear
+        for(int i=0;i<32*32;i++)
+            map[i]=0;
+        for(int i=0;i<32*32;i++)
+            cols[i]=-1;
+        for(int i=0;i<MAX_ZEDS;i++)
+            zed[i].state=Z_NONE;
+
+        for(int i=0;i<MAX_BULLETS;i++)
+            bullets[i].p.x=-1;
+        for(int i=0;i<MAX_PARTICLES;i++)
+            particles[i].p.x=-1;
+        for(int i=0;i<MAX_PLAYERS;i++)
+            pl[i].state=0;
 
         return 0;
     }
@@ -340,15 +452,8 @@ namespace Game{
         }
     }
 
-    void makeOBB(OBB* b, const int c){
+    void makeZedOBB(OBB* b, const int c){
         const float ZEDW2=0.565685425f;
-        if(c<0){
-            b->p.set(pl[0].p);
-            b->p.y+=1.4f;
-            b->e.set(vect(ZEDW2,1.4f,ZEDW2));
-            b->rotatey(-pl[0].lookr);
-            return;
-        }
         b->p.set(zed[c].p);
         if(zed[c].state==Z_DEAD){
             b->p.y+=ZEDW2;
@@ -402,7 +507,7 @@ namespace Game{
     }
 
     //returns max of 0-none, 1-wall, 2-side of block, 3-zed
-    int collideCharacter(const int me, float& x, float& y, float& z, const float rad){
+    int collideCharacter(const int me, bool isplayer, float& x, float& y, float& z, const float rad){
         int ret=0;
         if(x<16.0f+rad){ x=16.0f+rad; ret=1; }
         if(z<16.0f+rad){ z=16.0f+rad; ret=1; }
@@ -420,37 +525,14 @@ namespace Game{
         for(int ic=0;ic<4;ic++){
             int c=cs[ic];
             while(c!=-1){
-                if(c==me){
+                if(!isplayer && c==me){
                     c=zed[c].cnext;
                     continue;
                 }
-                /*//obb-obb test
-                OBB b;
-                makeOBB(&b,c);
-                if(intersectionOBB(a,b)){
-                    const float HEIGHT=zed[c].p.y+(zed[c].state==Z_DEAD?1.13137085f:2.8f);
-                    if(me<0){
-                        if(pl[0].p.y>HEIGHT-0.3f && pl[0].p.y<HEIGHT){
-                            if(pl[0].v.y<0){
-                                pl[0].p.y=HEIGHT;
-                                pl[0].v.y=0;
-                            }
-                            pl[0].onground=true;
-                        }
-                    }else{
-                        if(zed[me].p.y>HEIGHT-0.3f && zed[me].p.y<HEIGHT){
-                            if(zed[me].v.y<0){
-                                zed[me].p.y=HEIGHT;
-                                zed[me].v.y=0;
-                            }
-                        }
-                    }
-                    makeOBB(&a,me);
-                }*/
                 if(zed[c].state==Z_DEAD){
                     //upright-obb-upright-cylinder test
                     OBB b;
-                    makeOBB(&b,c);
+                    makeZedOBB(&b,c);
                     vect p(x,y,z);
                     b.wtol(p);
                     if(!(p.y<-2.8f || p.y>b.e.y)){
@@ -484,13 +566,13 @@ namespace Game{
                             }
                         }
                         if(hit && ontop){
-                            if(me<0){
-                                if(pl[0].v.y<0){
+                            if(isplayer){
+                                if(pl[me].v.y<0){
                                     p.y=b.e.y; b.ltow(p);
-                                    pl[0].p.y=p.y;
-                                    pl[0].v.y=0;
+                                    pl[me].p.y=p.y;
+                                    pl[me].v.y=0;
                                 }
-                                pl[0].onground=true;
+                                pl[me].onground=true;
                             }else{
                                 if(zed[me].v.y<0){
                                     p.y=b.e.y; b.ltow(p);
@@ -531,7 +613,7 @@ namespace Game{
                 && !(map[i]&DOORZ_BIT && offx>4+rad && offx<8-rad) )
                 z+=16.0f-rad-offz;
         }
-        if(me>=0)
+        if(!isplayer)
             updateColInfo(me);
         if(ret<1 && x!=lastx || z!=lastz)
             ret=1;
@@ -601,7 +683,7 @@ namespace Game{
             while(c!=-1){
                 //obb-segment test against zed[c]
                 OBB b;
-                makeOBB(&b,c);
+                makeZedOBB(&b,c);
                 vect p1(x,y,z);
                 vect p2(x+halfdx,y+halfdy,z+halfdz);
 
@@ -669,7 +751,43 @@ namespace Game{
         }
     }
 
+    int pollEvents(){
+        for(int i=0;i<SDLK_LAST;i++) isKeyPressed[i]=false;
+        SDL_Event event;
+        while(SDL_PollEvent(&event)){
+            switch(event.type){
+            case SDL_KEYDOWN:
+                isKeyPressed[event.key.keysym.sym]=true;
+                isKeyDown[event.key.keysym.sym]=true;
+                break;
+            case SDL_KEYUP:
+                isKeyDown[event.key.keysym.sym]=false;
+                break;
+            case SDL_MOUSEMOTION: 
+                if(plid!=-1){ //TODO: check if grabbed, ungrab on ESC
+                    int mx,my;
+                    SDL_GetMouseState(&mx,&my);
+                    mx-=CENTER_X;
+                    my-=CENTER_Y;
+                    if(mx!=0 || my!=0){
+                        pl[plid].lookr+=mx*sensitivity;
+                        if(pl[plid].lookr>M_PI*2) pl[plid].lookr-=M_PI*2;
+                        if(pl[plid].lookr<0) pl[plid].lookr+=M_PI*2;
+                        pl[plid].lookp-=my*sensitivity;
+                        if(pl[plid].lookp>0.49f*M_PI) pl[plid].lookp=0.49f*M_PI;
+                        if(pl[plid].lookp<-0.49f*M_PI) pl[plid].lookp=-0.49f*M_PI;
+                        SDL_WarpMouse(CENTER_X,CENTER_Y);
+                    }
+                } break;
+            case SDL_QUIT:
+                return 1;
+            }
+        }
+        return 0;
+    }
+
     int updateFrame(){
+        const float MAX_TIMESTEP=0.1f;
         const float GRAVITY=30.0f;
         const float WALK_SPEED=10.0f;
         const float JUMP_SPEED=10.0f;
@@ -682,135 +800,123 @@ namespace Game{
         const float ZED_RANGE=32.0f;
         const int ZED_DAMAGE=30;
 
+        if(!isserver && (pollEvents() || keyPressed(SDLK_F10)))
+            return -1;
+        if(!isserver && gamestate==0)
+            return 0;
+
         const Uint32 time=SDL_GetTicks();
         static Uint32 timeLast=time;
-        const float t=CAPTURE_VIDEO?CAPTURE_STEP:(float)(time-timeLast)/1000.0f;
+        const float t=min((float)(time-timeLast)/1000.0f,MAX_TIMESTEP);
+        timeLast=time;
         if(t<=0)
             return 0;
-        if(CAPTURE_VIDEO && !REPLAYING){
-            static float wait=0;
-            float w=CAPTURE_STEP-(time-timeLast)/1000.0f;
-            wait+=w;
-            if(wait>0){
-                SDL_Delay(wait*1000.0f);
-                wait=(SDL_GetTicks()-time)/1000.0f;
-            }
-        }
-        timeLast=time;
 
-        //record/replay
-        unsigned char mb=SDL_GetMouseState(NULL,NULL);
-        bool K_LEFT=keyDown(SDLK_a);
-        bool K_RIGHT=keyDown(SDLK_d);
-        bool K_FORWARD=keyDown(SDLK_w);
-        bool K_BACK=keyDown(SDLK_s);
-        bool K_JUMP=keyDown(SDLK_SPACE);
-        bool K_USE=keyPressed(SDLK_e);
-        bool K_FIRE=mb&SDL_BUTTON(1);
-        if(CAPTURE_VIDEO){
-            if(REPLAYING){
-                pl[0].lookr=replay->f[frames].lookr;
-                pl[0].lookp=replay->f[frames].lookp;
-                K_LEFT    =replay->f[frames].keys& KB_LEFT;
-                K_RIGHT   =replay->f[frames].keys& KB_RIGHT;
-                K_FORWARD =replay->f[frames].keys& KB_FORWARD;
-                K_BACK    =replay->f[frames].keys& KB_BACK;
-                K_JUMP    =replay->f[frames].keys& KB_JUMP;
-                K_USE     =replay->f[frames].keys& KB_USE;
-                K_FIRE    =replay->f[frames].keys& KB_FIRE;
+        if(!isserver && plid>=0){
+            unsigned char mb=SDL_GetMouseState(NULL,NULL);
+            bool K_LEFT=keyDown(SDLK_a);
+            bool K_RIGHT=keyDown(SDLK_d);
+            bool K_FORWARD=keyDown(SDLK_w);
+            bool K_BACK=keyDown(SDLK_s);
+            bool K_JUMP=keyDown(SDLK_SPACE);
+            bool K_USE=keyPressed(SDLK_e);
+            bool K_FIRE=mb&SDL_BUTTON(1);
+            pl[plid].keys=0;
+            pl[plid].keys|=K_LEFT    ? KB_LEFT    :0;
+            pl[plid].keys|=K_RIGHT   ? KB_RIGHT   :0;
+            pl[plid].keys|=K_FORWARD ? KB_FORWARD :0;
+            pl[plid].keys|=K_BACK    ? KB_BACK    :0;
+            pl[plid].keys|=K_JUMP    ? KB_JUMP    :0;
+            pl[plid].keys|=K_USE     ? KB_USE     :0;
+            pl[plid].keys|=K_FIRE    ? KB_FIRE    :0;
+        }
+
+        for(int p=0;p<MAX_PLAYERS;p++) if(pl[p].state){
+            //player movement
+            float dirx=0;
+            float diry=0;
+            if(pl[p].keys&KB_FORWARD) diry+=1.0f;
+            if(pl[p].keys&KB_LEFT) dirx-=1.0f;
+            if(pl[p].keys&KB_BACK) diry-=1.0f;
+            if(pl[p].keys&KB_RIGHT) dirx+=1.0f;
+            if(dirx!=0 && diry!=0){
+                dirx*=0.70710678;
+                diry*=0.70710678;
+            }
+            const float lasty=pl[p].p.y;
+            pl[p].v.x=WALK_SPEED*(diry*cosf(pl[p].lookr)-dirx*sinf(pl[p].lookr));
+            pl[p].v.z=WALK_SPEED*(dirx*cosf(pl[p].lookr)+diry*sinf(pl[p].lookr));
+            pl[p].p.adds(pl[p].v,t);
+            if(pl[p].p.y>0){
+                pl[p].v.y-=GRAVITY*t;
             }else{
-                replay->f[frames].lookr=pl[0].lookr;
-                replay->f[frames].lookp=pl[0].lookp;
-                replay->f[frames].keys|= K_LEFT    ? KB_LEFT    :0;
-                replay->f[frames].keys|= K_RIGHT   ? KB_RIGHT   :0;
-                replay->f[frames].keys|= K_FORWARD ? KB_FORWARD :0;
-                replay->f[frames].keys|= K_BACK    ? KB_BACK    :0;
-                replay->f[frames].keys|= K_JUMP    ? KB_JUMP    :0;
-                replay->f[frames].keys|= K_USE     ? KB_USE     :0;
-                replay->f[frames].keys|= K_FIRE    ? KB_FIRE    :0;
+                pl[p].p.y=0;
+                pl[p].v.y=0;
+                pl[p].onground=true;
             }
-        }
+            if(collideCharacter(p,true,pl[p].p.x,pl[p].p.y,pl[p].p.z,PL_RAD)==2){
+                if(pl[p].v.y<CLIMB_SPEED)
+                    pl[p].v.y=CLIMB_SPEED;
+                pl[p].onground=true;
+            }
+            if(pl[p].keys&KB_JUMP && pl[p].onground){
+                pl[p].v.y=JUMP_SPEED;
+                pl[p].p.y+=0.01f;
+                pl[p].onground=false;
+            }
+            if(pl[p].p.y<lasty)
+                pl[p].onground=false;
+            const vect aim(cosf(pl[p].lookr)*cosf(pl[p].lookp),
+                            sinf(pl[p].lookp),
+                            sinf(pl[p].lookr)*cosf(pl[p].lookp));
 
-        //player movement
-        float dirx=0;
-        float diry=0;
-        if(K_FORWARD) diry+=1.0f;
-        if(K_LEFT) dirx-=1.0f;
-        if(K_BACK) diry-=1.0f;
-        if(K_RIGHT) dirx+=1.0f;
-        if(dirx!=0 && diry!=0){
-            dirx*=0.70710678;
-            diry*=0.70710678;
-        }
-        const float lasty=pl[0].p.y;
-        pl[0].v.x=WALK_SPEED*(diry*cosf(pl[0].lookr)-dirx*sinf(pl[0].lookr));
-        pl[0].v.z=WALK_SPEED*(dirx*cosf(pl[0].lookr)+diry*sinf(pl[0].lookr));
-        pl[0].p.adds(pl[0].v,t);
-        if(pl[0].p.y>0){
-            pl[0].v.y-=GRAVITY*t;
-        }else{
-            pl[0].p.y=0;
-            pl[0].v.y=0;
-            pl[0].onground=true;
-        }
-        if(collideCharacter(-1,pl[0].p.x,pl[0].p.y,pl[0].p.z,PL_RAD)==2){
-            if(pl[0].v.y<CLIMB_SPEED)
-                pl[0].v.y=CLIMB_SPEED;
-            pl[0].onground=true;
-        }
-        if(K_JUMP && pl[0].onground){
-            pl[0].v.y=JUMP_SPEED;
-            pl[0].p.y+=0.01f;
-            pl[0].onground=false;
-        }
-        if(pl[0].p.y<lasty)
-            pl[0].onground=false;
-        cam.set(pl[0].p);
-        cam.y+=2.5f;
-        const vect aim(cosf(pl[0].lookr)*cosf(pl[0].lookp),
-                        sinf(pl[0].lookp),
-                        sinf(pl[0].lookr)*cosf(pl[0].lookp));
-        look.set(cam).add(aim);
+            if(p==plid){
+                cam.set(pl[p].p);
+                cam.y+=2.5f;
+                look.set(cam).add(aim);
+            }
 
-        //pickup
-        if(K_USE && (pl[0].health<100 || pl[0].ammo<120))
-            for(int i=0;i<MAX_ZEDS;i++)
-                if((zed[i].state==Z_HEALTH || zed[i].state==Z_AMMO)
-                    && sqr(pl[0].p.x-zed[i].p.x)+sqr(pl[0].p.z-zed[i].p.z)<PL_RAD*PL_RAD*4){
-                    if(zed[i].state==Z_HEALTH){
-                        if(pl[0].health<100){
-                            pl[0].health+=25;
-                            if(pl[0].health>100)
-                                pl[0].health=100;
-                            updateHealthHud();
-                            zed[i].state=Z_NONE;
-                            break;
-                        }
-                    }else{
-                        if(pl[0].ammo<120){
-                            pl[0].ammo+=30;
-                            if(pl[0].ammo>120)
-                                pl[0].ammo=120;
-                            zed[i].state=Z_NONE;
-                            break;
+            //pickup
+            if(pl[p].keys&KB_USE && (pl[p].health<100 || pl[p].ammo<120))
+                for(int i=0;i<MAX_ZEDS;i++)
+                    if((zed[i].state==Z_HEALTH || zed[i].state==Z_AMMO)
+                        && sqr(pl[p].p.x-zed[i].p.x)+sqr(pl[p].p.z-zed[i].p.z)<PL_RAD*PL_RAD*4){
+                        if(zed[i].state==Z_HEALTH){
+                            if(pl[p].health<100){
+                                pl[p].health+=25;
+                                if(pl[p].health>100)
+                                    pl[p].health=100;
+                                if(p==plid)
+                                    updateHealthHud();
+                                zed[i].state=Z_NONE;
+                                break;
+                            }
+                        }else{
+                            if(pl[p].ammo<120){
+                                pl[p].ammo+=30;
+                                if(pl[p].ammo>120)
+                                    pl[p].ammo=120;
+                                zed[i].state=Z_NONE;
+                                break;
+                            }
                         }
                     }
-                }
 
-        //shooting
-        if(pl[0].shootdelay>0)
-            pl[0].shootdelay-=t;
-        if(pl[0].ammo>0 && K_FIRE && pl[0].shootdelay<=0){
-            for(int i=0;i<MAX_BULLETS;i++)
-                if(bullets[i].p.x==-1){
-                    bullets[i].p.set(pl[0].p).adds(aim,0.75f);
-                    bullets[i].p.y+=2.5f-0.3f;
-                    bullets[i].v.set(pl[0].v).adds(aim,BULLET_SPEED);
-                    bullets[i].v.y+=0.15f*GRAVITY;
-                    pl[0].ammo--;
-                    break;
-                }
-            pl[0].shootdelay=SHOOT_DELAY;
+            //shooting
+            if(pl[p].shootdelay>0)
+                pl[p].shootdelay-=t;
+            if(pl[p].ammo>0 && pl[p].keys&KB_FIRE && pl[p].shootdelay<=0){
+                for(int i=0;i<MAX_BULLETS;i++)
+                    if(bullets[i].p.x==-1){
+                        bullets[i].p.set(pl[p].p).adds(aim,0.75f);
+                        bullets[i].p.y+=2.5f-0.3f;
+                        bullets[i].v.set(pl[p].v).adds(aim,BULLET_SPEED);
+                        bullets[i].v.y+=0.15f*GRAVITY;
+                        pl[p].ammo--;
+                        break;
+                    }
+                pl[p].shootdelay=SHOOT_DELAY;
+            }
         }
 
         //bullets
@@ -861,26 +967,27 @@ namespace Game{
                     //wander aimlessly
                     zed[i].p.x+=WALK_SPEED*1.5f*cosf(zed[i].rot)*t;
                     zed[i].p.z+=WALK_SPEED*1.5f*sinf(zed[i].rot)*t;
-                    switch(collideCharacter(i,zed[i].p.x,zed[i].p.y,zed[i].p.z,PL_RAD)){
+                    switch(collideCharacter(i,false,zed[i].p.x,zed[i].p.y,zed[i].p.z,PL_RAD)){
                     case 0:
-                        if(sqr(pl[0].p.x-zed[i].p.x)+sqr(pl[0].p.z-zed[i].p.z)<2.56f){
-                            const float dist=sqrtf(sqr(zed[i].p.x-pl[0].p.x)+sqr(zed[i].p.z-pl[0].p.z));
-                            zed[i].p.x+=(1.60f-dist)*(zed[i].p.x-pl[0].p.x)/dist;
-                            zed[i].p.z+=(1.60f-dist)*(zed[i].p.z-pl[0].p.z)/dist;
-                            zed[i].rot=rng.rand(M_PI*2);
-                        }
+                        for(int p=0;p<MAX_PLAYERS;p++) if(pl[p].state)
+                            if(sqr(pl[p].p.x-zed[i].p.x)+sqr(pl[p].p.z-zed[i].p.z)<2.56f){
+                                const float dist=sqrtf(sqr(zed[i].p.x-pl[p].p.x)+sqr(zed[i].p.z-pl[p].p.z));
+                                zed[i].p.x+=(1.60f-dist)*(zed[i].p.x-pl[p].p.x)/dist;
+                                zed[i].p.z+=(1.60f-dist)*(zed[i].p.z-pl[p].p.z)/dist;
+                                zed[i].rot=rng.rand(M_PI*2);
+                            }
                         break;
                     case 2:
                         if(zed[i].v.y<CLIMB_SPEED)
                             zed[i].v.y=CLIMB_SPEED;
                         break;
                     default:
-                        if(sqr(pl[0].p.x-zed[i].p.x)+sqr(pl[0].p.z-zed[i].p.z)<ZED_RANGE*ZED_RANGE){
-                            zed[i].state=Z_ATTACKING;
-                            zed[i].rot=atan2f(pl[0].p.z-zed[i].p.z,pl[0].p.x-zed[i].p.x);
-                        }else{
-                            zed[i].rot=rng.rand(M_PI*2);
-                        }
+                        zed[i].rot=rng.rand(M_PI*2);
+                        for(int p=0;p<MAX_PLAYERS;p++) if(pl[p].state)
+                            if(sqr(pl[p].p.x-zed[i].p.x)+sqr(pl[p].p.z-zed[i].p.z)<ZED_RANGE*ZED_RANGE){
+                                zed[i].state=Z_ATTACKING;
+                                zed[i].rot=atan2f(pl[p].p.z-zed[i].p.z,pl[p].p.x-zed[i].p.x);
+                            }
                     }
                     if(zed[i].p.y>=0){
                         zed[i].p.y+=zed[i].v.y*t;
@@ -893,15 +1000,17 @@ namespace Game{
                 case Z_ATTACKING: {
                     zed[i].p.x+=WALK_SPEED*1.5f*cosf(zed[i].rot)*t;
                     zed[i].p.z+=WALK_SPEED*1.5f*sinf(zed[i].rot)*t;
-                    if(sqr(pl[0].p.x-zed[i].p.x)+sqr(pl[0].p.z-zed[i].p.z)<2.56f){
-                        pl[0].health-=ZED_DAMAGE;
-                        if(pl[0].health<0)
-                            respawnPlayer(0);
-                        updateHealthHud();
-                        zed[i].state=Z_WANDERING;
-                        zed[i].rot=rng.rand(M_PI*2);
-                    }
-                    switch(collideCharacter(i,zed[i].p.x,zed[i].p.y,zed[i].p.z,PL_RAD)){
+                    for(int p=0;p<MAX_PLAYERS;p++) if(pl[p].state)
+                        if(sqr(pl[p].p.x-zed[i].p.x)+sqr(pl[p].p.z-zed[i].p.z)<2.56f){
+                            pl[p].health-=ZED_DAMAGE;
+                            if(pl[p].health<0)
+                                respawnPlayer(0);
+                            if(p==plid)
+                                updateHealthHud();
+                            zed[i].state=Z_WANDERING;
+                            zed[i].rot=rng.rand(M_PI*2);
+                        }
+                    switch(collideCharacter(i,false,zed[i].p.x,zed[i].p.y,zed[i].p.z,PL_RAD)){
                     case 0:
                         break;
                     case 2:
@@ -1107,6 +1216,34 @@ namespace Game{
         return 0;
     }
 
+    int drawPlayers(){
+        const float ZEDW=0.80f;
+        for(int i=0;i<MAX_PLAYERS;i++)
+            if(pl[i].state && i!=plid){
+                glPushMatrix();
+                glTranslatef(pl[i].p.x,pl[i].p.y,pl[i].p.z);
+                glRotatef(-pl[i].lookr*180.0f/M_PI,0.0f,1.0f,0.0f);
+
+                glColor3f(0.55f,0.55f,0.55f);
+                glBegin(GL_QUAD_STRIP);
+                glVertex3f(+ZEDW,0.0f,0.0f); glVertex3f(+ZEDW,2.8f,0.0f);
+                glVertex3f(0.0f,0.0f,+ZEDW); glVertex3f(0.0f,2.8f,+ZEDW);
+                glVertex3f(-ZEDW,0.0f,0.0f); glVertex3f(-ZEDW,2.8f,0.0f);
+                glVertex3f(0.0f,0.0f,-ZEDW); glVertex3f(0.0f,2.8f,-ZEDW);
+                glVertex3f(+ZEDW,0.0f,0.0f); glVertex3f(+ZEDW,2.8f,0.0f);
+                glEnd();
+                glBegin(GL_QUADS);
+                glVertex3f(+ZEDW,0.0f,0.0f); glVertex3f(0.0f,0.0f,+ZEDW);
+                glVertex3f(-ZEDW,0.0f,0.0f); glVertex3f(0.0f,0.0f,-ZEDW);
+                glVertex3f(+ZEDW,2.8f,0.0f); glVertex3f(0.0f,2.8f,+ZEDW);
+                glVertex3f(-ZEDW,2.8f,0.0f); glVertex3f(0.0f,2.8f,-ZEDW);
+                glEnd();
+
+                glPopMatrix();
+            }
+        return 0;
+    }
+
     int drawParticles(){
 	glEnable(GL_CULL_FACE);
         glColor3f(0.76f,0.76f,0.76f);
@@ -1131,6 +1268,30 @@ namespace Game{
     }
 
     int renderFrame(){
+        if(!isserver && gamestate==0){
+            glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+            glMatrixMode(GL_PROJECTION);
+            glLoadIdentity();
+            glOrtho(0,WINDOW_W,0,WINDOW_H,-1.0f,1.0f);
+            glMatrixMode(GL_MODELVIEW);
+            glLoadIdentity();
+
+            glColor3f(0.40f,0.40f,0.40f);
+            glBegin(GL_QUADS);
+            glVertex2i(WINDOW_W/2-28,WINDOW_H/2-20); glVertex2i(WINDOW_W/2-28,WINDOW_H/2+4);
+            glVertex2i(WINDOW_W/2-4,WINDOW_H/2+4); glVertex2i(WINDOW_W/2-4,WINDOW_H/2-20);
+            glVertex2i(WINDOW_W/2+4,WINDOW_H/2-4); glVertex2i(WINDOW_W/2+4,WINDOW_H/2+20);
+            glVertex2i(WINDOW_W/2+28,WINDOW_H/2+20); glVertex2i(WINDOW_W/2+28,WINDOW_H/2-4);
+            glVertex2i(WINDOW_W/2-4,WINDOW_H/2-14); glVertex2i(WINDOW_W/2-4,WINDOW_H/2-10);
+            glVertex2i(WINDOW_W/2+16,WINDOW_H/2-10); glVertex2i(WINDOW_W/2+16,WINDOW_H/2-14);
+            glVertex2i(WINDOW_W/2+16,WINDOW_H/2-14); glVertex2i(WINDOW_W/2+16,WINDOW_H/2-4);
+            glVertex2i(WINDOW_W/2+20,WINDOW_H/2-4); glVertex2i(WINDOW_W/2+20,WINDOW_H/2-14);
+            glEnd();
+
+            SDL_GL_SwapBuffers();
+            return 0;
+        }
+
 	glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
         glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
@@ -1142,6 +1303,7 @@ namespace Game{
 	glEnable(GL_DEPTH_TEST);
         drawBuildings();
         drawZeds();
+        drawPlayers();
         drawParticles();
 	glDisable(GL_DEPTH_TEST);
 
@@ -1173,83 +1335,21 @@ namespace Game{
         glEnd();
         //ammo
         glBegin(GL_LINES);
-        for(int i=0;i<pl[0].ammo;i++){
-            glVertex2f(WINDOW_W-POSX-(i%30)*4,POSY+(i/30)*10);
-            glVertex2f(WINDOW_W-POSX-(i%30)*4,POSY+(i/30)*10+8);
-        }
+        if(plid!=-1)
+            for(int i=0;i<pl[plid].ammo;i++){
+                glVertex2f(WINDOW_W-POSX-(i%30)*4,POSY+(i/30)*10);
+                glVertex2f(WINDOW_W-POSX-(i%30)*4,POSY+(i/30)*10+8);
+            }
         glEnd();
         glDisable(GL_BLEND);
 
         SDL_GL_SwapBuffers();
         frames++;
 
-        if(CAPTURE_VIDEO && REPLAYING){
-            glAccum(GL_ACCUM,1.0/CAPTURE_BLUR);
-            if(frames%CAPTURE_BLUR==0){
-                glAccum(GL_RETURN,1.0);
-                //save frame
-                static char capturefile[]="cap/0000.tga";
-                SOIL_save_screenshot(capturefile,SOIL_SAVE_TYPE_TGA,0,0,WINDOW_W,WINDOW_H);
-                for(int i=7;i>=4;i--) if(++capturefile[i]>'9') capturefile[i]='0'; else break;
-                glClear(GL_ACCUM_BUFFER_BIT);
-            }
-        }
+        //SOIL_save_screenshot(capturefile,SOIL_SAVE_TYPE_TGA,0,0,WINDOW_W,WINDOW_H);
 
         return 0;
     }
 
-    int pollEvents(){
-        for(int i=0;i<SDLK_LAST;i++) isKeyPressed[i]=false;
-        SDL_Event event;
-        while(SDL_PollEvent(&event)){
-            switch(event.type){
-            case SDL_KEYDOWN:
-                isKeyPressed[event.key.keysym.sym]=true;
-                isKeyDown[event.key.keysym.sym]=true;
-                break;
-            case SDL_KEYUP:
-                isKeyDown[event.key.keysym.sym]=false;
-                break;
-            case SDL_MOUSEMOTION: { //TODO: check if grabbed, ungrab on ESC
-                int mx,my;
-                SDL_GetMouseState(&mx,&my);
-                mx-=CENTER_X;
-                my-=CENTER_Y;
-                if(mx!=0 || my!=0){
-                    pl[0].lookr+=mx*sensitivity;
-                    if(pl[0].lookr>M_PI*2) pl[0].lookr-=M_PI*2;
-                    if(pl[0].lookr<0) pl[0].lookr+=M_PI*2;
-                    pl[0].lookp-=my*sensitivity;
-                    if(pl[0].lookp>0.49f*M_PI) pl[0].lookp=0.49f*M_PI;
-                    if(pl[0].lookp<-0.49f*M_PI) pl[0].lookp=-0.49f*M_PI;
-                    SDL_WarpMouse(CENTER_X,CENTER_Y);
-                }
-                } break;
-            case SDL_QUIT:
-                return 1;
-            }
-        }
-        return 0;
-    }
-
-}
-
-int main(){
-    using namespace Game;
-    init();
-    for(;;){
-        if(pollEvents() || keyPressed(SDLK_F10))
-            break;
-        if(CAPTURE_VIDEO && !REPLAYING && keyPressed(SDLK_F8)){
-            replay->numframes=frames;
-            REPLAYING=true;
-            init();
-        }
-        updateFrame();
-        renderFrame();
-        if(REPLAYING && frames>=replay->numframes)
-            break;
-    }
-    return 0;
 }
 

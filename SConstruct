@@ -10,5 +10,6 @@ libs = ['SDL','SDL_net','GL','GLU','SOIL']
 env.Append(CPPPATH = ['/opt/local/include/'])
 print env['CPPPATH']
 
-Program('game', ['game.cpp'], LIBS=libs, FRAMEWORKS=env['FRAMEWORKS'], LIBPATH='.', CPPPATH=env['CPPPATH'], CPPFLAGS=flags)
+Program('server', ['server.cpp','game.cpp'], LIBS=libs, FRAMEWORKS=env['FRAMEWORKS'], LIBPATH='.', CPPPATH=env['CPPPATH'], CPPFLAGS=flags)
+Program('client', ['client.cpp','game.cpp'], LIBS=libs, FRAMEWORKS=env['FRAMEWORKS'], LIBPATH='.', CPPPATH=env['CPPPATH'], CPPFLAGS=flags)
 
