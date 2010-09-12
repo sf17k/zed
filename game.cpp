@@ -3,7 +3,7 @@
 #include <iostream>
 #include <math.h>
 #include "MersenneTwister.h"
-#include "SOIL.h"
+//#include "SOIL.h"
 #include "game.h"
 #include "net.h"
 

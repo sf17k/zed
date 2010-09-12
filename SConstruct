@@ -5,7 +5,7 @@ env = Environment(CPPPATH='src')
 env['FRAMEWORKS'] = ['OpenGL', 'Foundation', 'Cocoa'] 
 
 flags = '-Wall -pedantic -g'
-libs = ['SDL','SDL_net','GL','GLU','SOIL']
+libs = ['SDL','SDL_net','GL','GLU']
 
 env.Append(CPPPATH = ['/opt/local/include/'])
 print env['CPPPATH']
